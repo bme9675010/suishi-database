@@ -237,7 +237,7 @@
       courseListEl.innerHTML = '<span class="empty">請先點下方「連線設定」填入 Apps Script 網址與金鑰</span>';
       return;
     }
-    fetch(settings.gasUrl + '?action=courses')
+    fetch(settings.gasUrl + '?action=courses&passKey=' + encodeURIComponent(settings.passKey))
       .then(function (r) { return r.json(); })
       .then(function (data) {
         if (data.ok) {

@@ -82,14 +82,17 @@ function setCourses(list) {
 
 /**
  * GET 端點:
- *   ?action=courses  → 回傳課程標籤清單 (PWA 開啟時抓取)
- *   (無參數)         → 健康檢查,瀏覽器打開網址確認服務正常
+ *   ?action=courses&passKey=xxx  → 回傳課程標籤清單 (PWA 開啟時抓取,需帶金鑰)
+ *   (無參數)                     → 健康檢查,瀏覽器打開網址確認服務正常
  */
 function doGet(e) {
   const action = e.parameter.action;
   const props = PropertiesService.getScriptProperties();
 
   if (action === 'courses') {
+    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+      return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
     const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
     return jsonResponse({ ok: true, courses: courses });
   }
