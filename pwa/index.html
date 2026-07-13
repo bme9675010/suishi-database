@@ -1,0 +1,436 @@
+<title>隨時資料庫</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="./manifest.json">
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --border: #334155;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-text: #04202e;
+    --ok: #4ade80;
+    --err: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Segoe UI", sans-serif;
+  }
+  body {
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+    max-width: 480px; margin: 0 auto;
+  }
+  h1 {
+    font-size: 20px; font-weight: 700; margin: 20px 0 4px;
+  }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 14px; margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 13px; color: var(--muted); font-weight: 600;
+    margin: 0 0 10px; text-transform: uppercase; letter-spacing: .03em;
+  }
+
+  .course-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .course-chip {
+    border: 1px solid var(--border); background: transparent; color: var(--text);
+    padding: 8px 14px; border-radius: 999px; font-size: 14px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .course-chip.active {
+    background: var(--accent); color: var(--accent-text); border-color: var(--accent);
+    font-weight: 700;
+  }
+
+  .camera-btn {
+    width: 100%; padding: 22px; border-radius: 16px; border: none;
+    background: var(--accent); color: var(--accent-text);
+    font-size: 18px; font-weight: 700; margin-top: 4px;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+  }
+  .camera-btn:disabled { opacity: .5; }
+  .camera-btn .icon { font-size: 22px; }
+
+  .status-row {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13px; color: var(--muted); margin-top: 10px;
+  }
+  .status-row.warn { color: #fbbf24; }
+
+  ul.log { list-style: none; margin: 0; padding: 0; }
+  ul.log li {
+    display: flex; justify-content: space-between; gap: 8px;
+    padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  ul.log li:last-child { border-bottom: none; }
+  ul.log .name { color: var(--text); }
+  ul.log .state.ok { color: var(--ok); }
+  ul.log .state.pending { color: var(--muted); }
+  ul.log .state.err { color: var(--err); }
+  .empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+
+  .settings-link {
+    text-align: center; color: var(--muted); font-size: 12px;
+    margin: 18px 0 30px; text-decoration: underline; background: none; border: none;
+  }
+
+  dialog {
+    border: none; border-radius: 14px; padding: 0; background: var(--card); color: var(--text);
+    width: min(420px, 90vw);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  .dialog-body { padding: 18px; }
+  .dialog-body h3 { margin: 0 0 12px; font-size: 16px; }
+  .dialog-body label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  .dialog-body input, .dialog-body textarea {
+    width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: #0f172a; color: var(--text); font-size: 14px;
+  }
+  .dialog-actions { display: flex; gap: 8px; margin-top: 16px; }
+  .dialog-actions button {
+    flex: 1; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: transparent; color: var(--text); font-size: 14px;
+  }
+  .dialog-actions button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 700; }
+
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #111827; color: var(--text); padding: 10px 16px; border-radius: 10px;
+    font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s;
+    max-width: 90vw; text-align: center; z-index: 50;
+  }
+  #toast.show { opacity: 1; }
+</style>
+
+<h1>隨時資料庫</h1>
+<div class="sub">選課程 → 拍照,自動歸檔到 Google Drive</div>
+
+<div class="card">
+  <h2>目前課程</h2>
+  <div class="course-list" id="courseList"><span class="empty">載入課程清單中…</span></div>
+</div>
+
+<div class="card">
+  <button class="camera-btn" id="shootBtn" disabled>
+    <span class="icon">📷</span><span>拍照上傳</span>
+  </button>
+  <input type="file" accept="image/*" capture="environment" id="cameraInput" hidden>
+  <div class="status-row" id="statusRow">
+    <span id="queueInfo">佇列: 0</span>
+    <span id="netInfo">連線中</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>最近上傳</h2>
+  <ul class="log" id="logList"><li class="empty">還沒有紀錄</li></ul>
+</div>
+
+<button class="settings-link" id="openSettings">連線設定</button>
+
+<dialog id="settingsDialog">
+  <div class="dialog-body">
+    <h3>連線設定</h3>
+    <label for="gasUrlInput">Apps Script 網址 (GAS_URL)</label>
+    <input id="gasUrlInput" placeholder="https://script.google.com/macros/s/xxx/exec">
+    <label for="passKeyInput">通行金鑰 (PASS_KEY)</label>
+    <input id="passKeyInput" placeholder="setup() 執行紀錄裡的那串">
+    <div class="dialog-actions">
+      <button id="cancelSettings">取消</button>
+      <button class="primary" id="saveSettings">儲存</button>
+    </div>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------- 設定 ----------
+  var settings = {
+    gasUrl: localStorage.getItem('gasUrl') || '',
+    passKey: localStorage.getItem('passKey') || ''
+  };
+
+  var courseListEl = document.getElementById('courseList');
+  var shootBtn = document.getElementById('shootBtn');
+  var cameraInput = document.getElementById('cameraInput');
+  var queueInfoEl = document.getElementById('queueInfo');
+  var netInfoEl = document.getElementById('netInfo');
+  var statusRowEl = document.getElementById('statusRow');
+  var logListEl = document.getElementById('logList');
+  var toastEl = document.getElementById('toast');
+  var settingsDialog = document.getElementById('settingsDialog');
+
+  var activeCourse = localStorage.getItem('activeCourse') || '';
+  var recentLog = [];
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    setTimeout(function () { toastEl.classList.remove('show'); }, 2200);
+  }
+
+  function isConfigured() {
+    return !!(settings.gasUrl && settings.passKey);
+  }
+
+  // ---------- 設定視窗 ----------
+  document.getElementById('openSettings').addEventListener('click', function () {
+    document.getElementById('gasUrlInput').value = settings.gasUrl;
+    document.getElementById('passKeyInput').value = settings.passKey;
+    settingsDialog.showModal();
+  });
+  document.getElementById('cancelSettings').addEventListener('click', function () {
+    settingsDialog.close();
+  });
+  document.getElementById('saveSettings').addEventListener('click', function () {
+    var url = document.getElementById('gasUrlInput').value.trim();
+    var key = document.getElementById('passKeyInput').value.trim();
+    settings.gasUrl = url;
+    settings.passKey = key;
+    localStorage.setItem('gasUrl', url);
+    localStorage.setItem('passKey', key);
+    settingsDialog.close();
+    toast('設定已儲存');
+    refreshCourses();
+    updateShootEnabled();
+  });
+
+  // ---------- 課程清單 ----------
+  function renderCourses(courses) {
+    courseListEl.innerHTML = '';
+    if (!courses || courses.length === 0) {
+      courseListEl.innerHTML = '<span class="empty">尚無課程,可在 Apps Script 執行 setCourses([...])</span>';
+      return;
+    }
+    if (!activeCourse || courses.indexOf(activeCourse) === -1) {
+      activeCourse = courses[0];
+      localStorage.setItem('activeCourse', activeCourse);
+    }
+    courses.forEach(function (c) {
+      var btn = document.createElement('button');
+      btn.className = 'course-chip' + (c === activeCourse ? ' active' : '');
+      btn.textContent = c;
+      btn.addEventListener('click', function () {
+        activeCourse = c;
+        localStorage.setItem('activeCourse', c);
+        renderCourses(courses);
+      });
+      courseListEl.appendChild(btn);
+    });
+  }
+
+  function refreshCourses() {
+    if (!isConfigured()) {
+      courseListEl.innerHTML = '<span class="empty">請先點下方「連線設定」填入 Apps Script 網址與金鑰</span>';
+      return;
+    }
+    fetch(settings.gasUrl + '?action=courses')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          localStorage.setItem('coursesCache', JSON.stringify(data.courses));
+          renderCourses(data.courses);
+        }
+      })
+      .catch(function () {
+        var cached = localStorage.getItem('coursesCache');
+        if (cached) {
+          renderCourses(JSON.parse(cached));
+          toast('離線中,使用上次的課程清單');
+        } else {
+          courseListEl.innerHTML = '<span class="empty">目前離線且無快取的課程清單</span>';
+        }
+      });
+  }
+
+  function updateShootEnabled() {
+    shootBtn.disabled = !isConfigured();
+  }
+
+  // ---------- IndexedDB 佇列 ----------
+  var DB_NAME = 'suishi-db-queue';
+  var STORE = 'queue';
+  var dbPromise = new Promise(function (resolve, reject) {
+    var req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = function () {
+      req.result.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+    };
+    req.onsuccess = function () { resolve(req.result); };
+    req.onerror = function () { reject(req.error); };
+  });
+
+  function withStore(mode, fn) {
+    return dbPromise.then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(STORE, mode);
+        var store = tx.objectStore(STORE);
+        var result = fn(store);
+        tx.oncomplete = function () { resolve(result); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  function queueAdd(item) {
+    return withStore('readwrite', function (store) { store.add(item); });
+  }
+  function queueDelete(id) {
+    return withStore('readwrite', function (store) { store.delete(id); });
+  }
+  function queueAll() {
+    return dbPromise.then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(STORE, 'readonly');
+        var req = tx.objectStore(STORE).getAll();
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { reject(req.error); };
+      });
+    });
+  }
+
+  // ---------- 上傳 ----------
+  function uploadItem(item) {
+    // 用 text/plain 避免瀏覽器對 GAS 發出 CORS 預檢請求 (GAS 不支援 OPTIONS)
+    return fetch(settings.gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        passKey: settings.passKey,
+        filename: item.filename,
+        mimeType: item.mimeType,
+        base64Data: item.base64Data,
+        tag: item.tag
+      })
+    }).then(function (r) { return r.json(); });
+  }
+
+  function pushLog(entry) {
+    recentLog.unshift(entry);
+    recentLog = recentLog.slice(0, 8);
+    renderLog();
+  }
+
+  function renderLog() {
+    if (recentLog.length === 0) {
+      logListEl.innerHTML = '<li class="empty">還沒有紀錄</li>';
+      return;
+    }
+    logListEl.innerHTML = '';
+    recentLog.forEach(function (e) {
+      var li = document.createElement('li');
+      var name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = e.tag + ' · ' + e.time;
+      var state = document.createElement('span');
+      state.className = 'state ' + e.state;
+      state.textContent = e.state === 'ok' ? '已上傳' : e.state === 'pending' ? '排隊中' : '失敗,等重試';
+      li.appendChild(name);
+      li.appendChild(state);
+      logListEl.appendChild(li);
+    });
+  }
+
+  function refreshQueueInfo() {
+    queueAll().then(function (all) {
+      queueInfoEl.textContent = '佇列: ' + all.length;
+      statusRowEl.classList.toggle('warn', all.length > 0);
+    });
+  }
+
+  var processing = false;
+  function processQueue() {
+    if (processing || !navigator.onLine || !isConfigured()) return;
+    processing = true;
+    queueAll().then(function (all) {
+      if (all.length === 0) { processing = false; return; }
+      var chain = Promise.resolve();
+      all.forEach(function (item) {
+        chain = chain.then(function () {
+          return uploadItem(item)
+            .then(function (res) {
+              if (res.ok) {
+                return queueDelete(item.id).then(function () {
+                  pushLog({ tag: item.tag, time: item.time, state: 'ok' });
+                });
+              } else {
+                pushLog({ tag: item.tag, time: item.time, state: 'err' });
+              }
+            })
+            .catch(function () {
+              // 網路問題,留在佇列裡,之後自動重試
+            });
+        });
+      });
+      chain.then(function () {
+        processing = false;
+        refreshQueueInfo();
+      });
+    });
+  }
+
+  // ---------- 拍照 ----------
+  shootBtn.addEventListener('click', function () { cameraInput.click(); });
+
+  cameraInput.addEventListener('change', function () {
+    var file = cameraInput.files[0];
+    cameraInput.value = '';
+    if (!file) return;
+
+    var reader = new FileReader();
+    reader.onload = function () {
+      var base64Data = reader.result.split(',')[1];
+      var now = new Date();
+      var stamp = now.toLocaleString('zh-TW', { hour12: false });
+      var item = {
+        filename: 'photo_' + now.getTime() + '.jpg',
+        mimeType: file.type || 'image/jpeg',
+        base64Data: base64Data,
+        tag: activeCourse || '未分類',
+        time: stamp
+      };
+      queueAdd(item).then(function () {
+        pushLog({ tag: item.tag, time: item.time, state: 'pending' });
+        refreshQueueInfo();
+        processQueue();
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // ---------- 連線狀態 ----------
+  function updateNetInfo() {
+    netInfoEl.textContent = navigator.onLine ? '連線中' : '離線';
+  }
+  window.addEventListener('online', function () {
+    updateNetInfo();
+    toast('已恢復連線,補傳佇列中的照片');
+    processQueue();
+  });
+  window.addEventListener('offline', updateNetInfo);
+  setInterval(processQueue, 20000);
+
+  // ---------- 啟動 ----------
+  updateShootEnabled();
+  updateNetInfo();
+  refreshQueueInfo();
+  refreshCourses();
+  processQueue();
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch(function () {});
+  }
+})();
+</script>

@@ -1,0 +1,213 @@
+/**
+ * 隨時資料庫 — 後端 (Google Apps Script)
+ *
+ * 部署與初次設定步驟請見 docs/SETUP.md。
+ * 這個檔案不需要你懂 Apps Script,只要照 SETUP.md 的步驟複製貼上、執行 setup() 一次即可。
+ */
+
+// ============ 初次設定 ============
+
+/**
+ * 只需執行一次。會自動建立:
+ *   - Drive 根資料夾「隨時資料庫」
+ *   - 收件夾「_收件夾」(手機錄音要存進這裡)
+ *   - 索引 Google Sheet
+ *   - 隨機通行金鑰 (PASS_KEY)
+ * 執行完後看「執行紀錄」(Ctrl+Enter 或選單「檢視 > 記錄」) 複製結果。
+ */
+function setup() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('ROOT_FOLDER_ID')) {
+    Logger.log('已經設定過了,略過。若要重設,先到「專案設定 > 指令碼屬性」把既有屬性刪掉再重跑。');
+    return;
+  }
+
+  const root = DriveApp.createFolder('隨時資料庫');
+  const inbox = root.createFolder('_收件夾');
+  const ss = SpreadsheetApp.create('隨時資料庫_索引');
+  const sheet = ss.getActiveSheet();
+  sheet.setName('索引');
+  sheet.appendRow(['時間', '類型', '課程標籤', '檔名', 'Drive連結', '來源', '備註']);
+  sheet.setFrozenRows(1);
+  sheet.autoResizeColumns(1, 7);
+  DriveApp.getFileById(ss.getId()).moveTo(root);
+
+  const passKey = Utilities.getUuid();
+
+  props.setProperties({
+    ROOT_FOLDER_ID: root.getId(),
+    INBOX_FOLDER_ID: inbox.getId(),
+    SHEET_ID: ss.getId(),
+    PASS_KEY: passKey,
+    COURSES: JSON.stringify(['未分類'])
+  });
+
+  Logger.log('====== 設定完成 ======');
+  Logger.log('根資料夾: ' + root.getUrl());
+  Logger.log('索引表: ' + ss.getUrl());
+  Logger.log('收件夾 ID (捷徑會用到): ' + inbox.getId());
+  Logger.log('PASS_KEY (PWA 和捷徑都要用這組,請妥善保存): ' + passKey);
+  Logger.log('=======================');
+  Logger.log('接下來:');
+  Logger.log('1. 執行 installTriggers() 安裝自動掃描收件夾的排程');
+  Logger.log('2. 用 setCourses([...]) 設定你的課程清單');
+  Logger.log('3. 部署 > 新增部署作業 > 網頁應用程式,依 SETUP.md 設定權限');
+}
+
+/**
+ * 安裝「每 5 分鐘掃描一次收件夾」的排程。只需執行一次(重跑會先清掉舊的再裝新的,不會重複)。
+ */
+function installTriggers() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'scanInbox') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('scanInbox').timeBased().everyMinutes(5).create();
+  Logger.log('已安裝排程:每 5 分鐘自動掃描收件夾一次。');
+}
+
+/**
+ * 設定/更新課程標籤清單。之後想增減課程,改這裡重跑就好,
+ * PWA 跟 iOS 捷徑(若用動態版本)都會抓到最新清單。
+ * 範例: setCourses(['未分類', 'RAG課', 'Agent課', 'LLM微調課'])
+ */
+function setCourses(list) {
+  if (!Array.isArray(list) || list.length === 0) {
+    throw new Error('請傳入非空陣列,例如 setCourses(["未分類","RAG課"])');
+  }
+  PropertiesService.getScriptProperties().setProperty('COURSES', JSON.stringify(list));
+  Logger.log('課程清單已更新: ' + list.join('、'));
+}
+
+// ============ Web API ============
+
+/**
+ * GET 端點:
+ *   ?action=courses  → 回傳課程標籤清單 (PWA 開啟時抓取)
+ *   (無參數)         → 健康檢查,瀏覽器打開網址確認服務正常
+ */
+function doGet(e) {
+  const action = e.parameter.action;
+  const props = PropertiesService.getScriptProperties();
+
+  if (action === 'courses') {
+    const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
+    return jsonResponse({ ok: true, courses: courses });
+  }
+
+  return jsonResponse({ ok: true, message: '隨時資料庫 API 運作中' });
+}
+
+/**
+ * POST 端點:PWA 拍照上傳用。
+ * Body (JSON): { passKey, filename, mimeType, base64Data, tag }
+ */
+function doPost(e) {
+  const props = PropertiesService.getScriptProperties();
+
+  try {
+    const body = JSON.parse(e.postData.contents);
+
+    if (body.passKey !== props.getProperty('PASS_KEY')) {
+      return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
+    if (!body.base64Data || !body.filename) {
+      return jsonResponse({ ok: false, error: 'missing base64Data or filename' });
+    }
+
+    const bytes = Utilities.base64Decode(body.base64Data);
+    const blob = Utilities.newBlob(bytes, body.mimeType || 'application/octet-stream', body.filename);
+
+    const result = fileIntoLibrary(blob, 'photo', body.tag || '未分類', 'PWA');
+    return jsonResponse({ ok: true, url: result.url, name: result.name });
+  } catch (err) {
+    return jsonResponse({ ok: false, error: String(err) });
+  }
+}
+
+function jsonResponse(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ============ 收件夾自動掃描 (錄音走這條路) ============
+
+/**
+ * 由排程每 5 分鐘呼叫一次。掃描收件夾,把每個檔案歸檔到
+ * 隨時資料庫/年/月/類型/ 底下,並寫入索引表,最後把收件夾裡的原檔丟到垃圾桶。
+ *
+ * 檔名慣例(iOS 捷徑會自動照這個規則命名):
+ *   REC__<課程標籤>__<任意文字>.副檔名
+ * 沒有照這個規則命名的檔案,標籤會自動歸類為「未分類」,不會出錯。
+ */
+function scanInbox() {
+  const props = PropertiesService.getScriptProperties();
+  const inbox = DriveApp.getFolderById(props.getProperty('INBOX_FOLDER_ID'));
+  const files = inbox.getFiles();
+
+  while (files.hasNext()) {
+    const file = files.next();
+    try {
+      processInboxFile(file);
+    } catch (err) {
+      Logger.log('處理失敗: ' + file.getName() + ' - ' + err);
+    }
+  }
+}
+
+function processInboxFile(file) {
+  const name = file.getName();
+
+  let tag = '未分類';
+  const m = name.match(/^REC__(.+?)__/);
+  if (m) tag = m[1];
+
+  const mime = file.getMimeType();
+  let type = 'doc';
+  if (mime.indexOf('image/') === 0) type = 'photo';
+  else if (mime.indexOf('audio/') === 0 || mime.indexOf('video/') === 0) type = 'audio';
+
+  const blob = file.getBlob();
+  fileIntoLibrary(blob, type, tag, '手機同步');
+
+  file.setTrashed(true);
+}
+
+// ============ 共用歸檔邏輯 ============
+
+const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', doc: '文件' };
+
+/**
+ * 把一個 blob 歸檔到 隨時資料庫/年/月/類型/,改成統一命名規則,並寫入索引表一列。
+ */
+function fileIntoLibrary(blob, type, tag, source) {
+  const props = PropertiesService.getScriptProperties();
+  const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
+  const now = new Date();
+
+  const yyyy = Utilities.formatDate(now, 'Asia/Taipei', 'yyyy');
+  const mm = Utilities.formatDate(now, 'Asia/Taipei', 'MM');
+  const typeFolderName = TYPE_FOLDER_NAME[type] || '其他';
+
+  const yearFolder = getOrCreateFolder(root, yyyy);
+  const monthFolder = getOrCreateFolder(yearFolder, mm);
+  const typeFolder = getOrCreateFolder(monthFolder, typeFolderName);
+
+  const stamp = Utilities.formatDate(now, 'Asia/Taipei', 'yyyyMMdd_HHmm');
+  const safeTag = String(tag || '未分類').replace(/[\\\/:*?"<>|]/g, '');
+  const originalName = blob.getName() || '';
+  const ext = originalName.indexOf('.') >= 0 ? originalName.split('.').pop() : '';
+  const newName = typeFolderName + '_' + stamp + '_' + safeTag + (ext ? '.' + ext : '');
+  blob.setName(newName);
+
+  const file = typeFolder.createFile(blob);
+
+  const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+  sheet.appendRow([now, typeFolderName, safeTag, newName, file.getUrl(), source, '']);
+
+  return { url: file.getUrl(), name: newName };
+}
+
+function getOrCreateFolder(parent, name) {
+  const it = parent.getFoldersByName(name);
+  if (it.hasNext()) return it.next();
+  return parent.createFolder(name);
+}
