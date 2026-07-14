@@ -144,7 +144,8 @@ function handleAddCourse(body, props) {
   }
 
   const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
-  if (courses.indexOf(name) === -1) {
+  const exists = courses.some(function (c) { return c.toLowerCase() === name.toLowerCase(); });
+  if (!exists) {
     courses.push(name);
     props.setProperty('COURSES', JSON.stringify(courses));
   }
@@ -188,14 +189,14 @@ function scanInbox() {
   while (files.hasNext()) {
     const file = files.next();
     try {
-      processInboxFile(file);
+      processInboxFile(file, props);
     } catch (err) {
       Logger.log('處理失敗: ' + file.getName() + ' - ' + err);
     }
   }
 }
 
-function processInboxFile(file) {
+function processInboxFile(file, props) {
   const name = file.getName();
 
   let tag = '未分類';
@@ -206,6 +207,7 @@ function processInboxFile(file) {
     const base = name.indexOf('.') >= 0 ? name.substring(0, name.lastIndexOf('.')) : name;
     if (base.trim()) tag = base.trim();
   }
+  tag = normalizeTag(tag, props);
 
   const mime = file.getMimeType();
   let type = 'doc';
@@ -216,6 +218,19 @@ function processInboxFile(file) {
   fileIntoLibrary(blob, type, tag, '手機同步');
 
   file.setTrashed(true);
+}
+
+/**
+ * 如果 tag 忽略大小寫後跟課程清單裡某個名稱相同,改用清單裡登記的那個大小寫版本,
+ * 避免同一門課因為打字時大小寫不一致,被拆成兩個不同資料夾(例如 Python爬蟲課 vs python爬蟲課)。
+ */
+function normalizeTag(tag, props) {
+  const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
+  const lower = tag.toLowerCase();
+  for (let i = 0; i < courses.length; i++) {
+    if (courses[i].toLowerCase() === lower) return courses[i];
+  }
+  return tag;
 }
 
 // ============ 共用歸檔邏輯 ============
