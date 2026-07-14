@@ -191,9 +191,10 @@ function extractFileId(url) {
 
 /**
  * GET 端點:
- *   ?action=courses&passKey=xxx        → 回傳課程標籤清單 (PWA 開啟時抓取,需帶金鑰)
- *   ?action=pendingCleanup&passKey=xxx → 回傳「已從清單刪除但 Drive 資料夾還在」的待清理提醒
- *   (無參數)                           → 健康檢查,瀏覽器打開網址確認服務正常
+ *   ?action=courses&passKey=xxx              → 回傳課程標籤清單 (PWA 開啟時抓取,需帶金鑰)
+ *   ?action=pendingCleanup&passKey=xxx       → 回傳「已從清單刪除但 Drive 資料夾還在」的待清理提醒
+ *   ?action=listFiles&course=X&passKey=xxx   → 回傳某課程底下所有照片/錄音清單
+ *   (無參數)                                 → 健康檢查,瀏覽器打開網址確認服務正常
  */
 function doGet(e) {
   const action = e.parameter.action;
@@ -215,7 +216,38 @@ function doGet(e) {
     return jsonResponse({ ok: true, pending: pending });
   }
 
+  if (action === 'listFiles') {
+    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+      return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
+    const files = getFilesForCourse(String(e.parameter.course || ''), props);
+    return jsonResponse({ ok: true, files: files });
+  }
+
   return jsonResponse({ ok: true, message: '隨時資料庫 API 運作中' });
+}
+
+/**
+ * 從索引表撈出某個課程標籤(忽略大小寫)底下的所有紀錄,依時間新到舊排序,最多回傳 200 筆。
+ */
+function getFilesForCourse(courseName, props) {
+  const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const data = sheet.getRange(2, 1, lastRow - 1, 5).getValues(); // 時間,類型,課程標籤,檔名,Drive連結
+  const lower = courseName.toLowerCase();
+  const results = [];
+
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    if (String(row[2]).toLowerCase() !== lower) continue;
+    const time = row[0] instanceof Date ? row[0].toISOString() : String(row[0]);
+    results.push({ time: time, type: row[1], filename: row[3], url: row[4] });
+  }
+
+  results.sort(function (a, b) { return new Date(b.time) - new Date(a.time); });
+  return results.slice(0, 200);
 }
 
 /**
