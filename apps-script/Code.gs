@@ -169,8 +169,9 @@ function extractFileId(url) {
 
 /**
  * GET 端點:
- *   ?action=courses&passKey=xxx  → 回傳課程標籤清單 (PWA 開啟時抓取,需帶金鑰)
- *   (無參數)                     → 健康檢查,瀏覽器打開網址確認服務正常
+ *   ?action=courses&passKey=xxx        → 回傳課程標籤清單 (PWA 開啟時抓取,需帶金鑰)
+ *   ?action=pendingCleanup&passKey=xxx → 回傳「已從清單刪除但 Drive 資料夾還在」的待清理提醒
+ *   (無參數)                           → 健康檢查,瀏覽器打開網址確認服務正常
  */
 function doGet(e) {
   const action = e.parameter.action;
@@ -184,14 +185,23 @@ function doGet(e) {
     return jsonResponse({ ok: true, courses: courses });
   }
 
+  if (action === 'pendingCleanup') {
+    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+      return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
+    const pending = JSON.parse(props.getProperty('PENDING_CLEANUP') || '[]');
+    return jsonResponse({ ok: true, pending: pending });
+  }
+
   return jsonResponse({ ok: true, message: '隨時資料庫 API 運作中' });
 }
 
 /**
  * POST 端點:
- *   action: 'addCourse'    → PWA 新增課程用。Body: { passKey, action, courseName }
- *   action: 'removeCourse' → PWA 刪除課程用。Body: { passKey, action, courseName }
- *   (無 action)            → PWA 拍照上傳用。Body: { passKey, filename, mimeType, base64Data, tag }
+ *   action: 'addCourse'     → PWA 新增課程用。Body: { passKey, action, courseName }
+ *   action: 'removeCourse'  → PWA 刪除課程用。Body: { passKey, action, courseName }
+ *   action: 'dismissCleanup'→ PWA 確認已手動清理 Drive 用。Body: { passKey, action, courseName }
+ *   (無 action)             → PWA 拍照上傳用。Body: { passKey, filename, mimeType, base64Data, tag }
  */
 function doPost(e) {
   const props = PropertiesService.getScriptProperties();
@@ -208,6 +218,9 @@ function doPost(e) {
     }
     if (body.action === 'removeCourse') {
       return handleRemoveCourse(body, props);
+    }
+    if (body.action === 'dismissCleanup') {
+      return handleDismissCleanup(body, props);
     }
 
     if (!body.base64Data || !body.filename) {
@@ -236,7 +249,11 @@ function handleAddCourse(body, props) {
     courses.push(name);
     props.setProperty('COURSES', JSON.stringify(courses));
   }
-  return jsonResponse({ ok: true, courses: courses });
+
+  // 重新新增回來,代表這個課程還要繼續用,順便清掉待清理提醒(如果有的話)
+  const pending = clearPendingCleanup(name, props);
+
+  return jsonResponse({ ok: true, courses: courses, pending: pending });
 }
 
 function handleRemoveCourse(body, props) {
@@ -249,7 +266,34 @@ function handleRemoveCourse(body, props) {
 
   courses.splice(idx, 1);
   props.setProperty('COURSES', JSON.stringify(courses));
-  return jsonResponse({ ok: true, courses: courses });
+
+  // 如果 Drive 裡這個課程還有實際資料夾(代表真的有存過檔案),記一筆待清理提醒
+  const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
+  let pending = JSON.parse(props.getProperty('PENDING_CLEANUP') || '[]');
+  if (root.getFoldersByName(name).hasNext() && !pending.some(function (p) { return p.name === name; })) {
+    pending.push({ name: name, removedAt: new Date().toISOString() });
+    props.setProperty('PENDING_CLEANUP', JSON.stringify(pending));
+  }
+
+  return jsonResponse({ ok: true, courses: courses, pending: pending });
+}
+
+function handleDismissCleanup(body, props) {
+  const name = String(body.courseName || '').trim();
+  const pending = clearPendingCleanup(name, props);
+  return jsonResponse({ ok: true, pending: pending });
+}
+
+/**
+ * 把某個課程名稱從「待清理提醒」清單裡移除(不分大小寫比對),回傳更新後的清單。
+ */
+function clearPendingCleanup(name, props) {
+  const pending = JSON.parse(props.getProperty('PENDING_CLEANUP') || '[]');
+  const filtered = pending.filter(function (p) { return p.name.toLowerCase() !== name.toLowerCase(); });
+  if (filtered.length !== pending.length) {
+    props.setProperty('PENDING_CLEANUP', JSON.stringify(filtered));
+  }
+  return filtered;
 }
 
 function jsonResponse(obj) {
@@ -336,6 +380,8 @@ function registerCourseIfNew(tag, props) {
     courses.push(tag);
     props.setProperty('COURSES', JSON.stringify(courses));
   }
+  // 又有新檔案歸檔到這個標籤,代表課程還在使用中,清掉可能殘留的待清理提醒
+  clearPendingCleanup(tag, props);
 }
 
 /**

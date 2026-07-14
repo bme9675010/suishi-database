@@ -69,6 +69,20 @@
     font-weight: 700;
   }
 
+  .cleanup-card { border-color: #fbbf24; }
+  .cleanup-card h2 { color: #fbbf24; }
+  ul.cleanup-list { list-style: none; margin: 0; padding: 0; }
+  ul.cleanup-list li {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  ul.cleanup-list li:last-child { border-bottom: none; }
+  ul.cleanup-list .hint { color: var(--muted); font-size: 11px; display: block; margin-top: 2px; }
+  .dismiss-cleanup-btn {
+    flex-shrink: 0; border: 1px solid var(--border); color: var(--muted); background: none;
+    padding: 5px 10px; border-radius: 8px; font-size: 12px; cursor: pointer;
+  }
+
   .camera-btn {
     width: 100%; padding: 22px; border-radius: 16px; border: none;
     background: var(--accent); color: var(--accent-text);
@@ -147,6 +161,11 @@
 
 <h1>隨時資料庫</h1>
 <div class="sub">選課程 → 拍照,自動歸檔到 Google Drive</div>
+
+<div class="card cleanup-card" id="cleanupCard" hidden>
+  <h2>⚠️ 待清理提醒</h2>
+  <ul class="cleanup-list" id="cleanupList"></ul>
+</div>
 
 <div class="card">
   <h2>目前課程</h2>
@@ -244,6 +263,8 @@
   var courseRecentEl = document.getElementById('courseRecent');
   var manageCoursesDialog = document.getElementById('manageCoursesDialog');
   var manageCourseListEl = document.getElementById('manageCourseList');
+  var cleanupCard = document.getElementById('cleanupCard');
+  var cleanupListEl = document.getElementById('cleanupList');
 
   var activeCourse = localStorage.getItem('activeCourse') || '';
   var recentLog = [];
@@ -318,6 +339,7 @@
           activeCourse = name;
           localStorage.setItem('activeCourse', name);
           renderCourses(data.courses);
+          renderPendingCleanup(data.pending);
           addCourseDialog.close();
           toast('已新增課程「' + name + '」');
         } else {
@@ -377,6 +399,7 @@
           localStorage.setItem('coursesCache', JSON.stringify(data.courses));
           renderCourses(data.courses);
           renderManageCourseList();
+          renderPendingCleanup(data.pending);
           toast('已刪除課程「' + name + '」');
         } else {
           btnEl.disabled = false;
@@ -386,6 +409,65 @@
       .catch(function () {
         btnEl.disabled = false;
         toast('離線中,無法刪除課程,請連網後再試');
+      });
+  }
+
+  // ---------- 待清理提醒 ----------
+  function refreshPendingCleanup() {
+    if (!isConfigured()) return;
+    fetch(settings.gasUrl + '?action=pendingCleanup&passKey=' + encodeURIComponent(settings.passKey))
+      .then(function (r) { return r.json(); })
+      .then(function (data) { if (data.ok) renderPendingCleanup(data.pending); })
+      .catch(function () {}); // 離線時安靜失敗,不影響主要功能
+  }
+
+  function renderPendingCleanup(pending) {
+    if (!pending || pending.length === 0) {
+      cleanupCard.hidden = true;
+      return;
+    }
+    cleanupCard.hidden = false;
+    cleanupListEl.innerHTML = '';
+    pending.forEach(function (p) {
+      var li = document.createElement('li');
+      var info = document.createElement('div');
+      var name = document.createElement('div');
+      name.textContent = p.name;
+      var hint = document.createElement('span');
+      hint.className = 'hint';
+      hint.textContent = '已從清單移除,但 Drive 資料夾還在,記得手動刪除';
+      info.appendChild(name);
+      info.appendChild(hint);
+      var btn = document.createElement('button');
+      btn.className = 'dismiss-cleanup-btn';
+      btn.textContent = '已清理';
+      btn.addEventListener('click', function () { dismissCleanup(p.name, btn); });
+      li.appendChild(info);
+      li.appendChild(btn);
+      cleanupListEl.appendChild(li);
+    });
+  }
+
+  function dismissCleanup(name, btnEl) {
+    btnEl.disabled = true;
+    fetch(settings.gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ passKey: settings.passKey, action: 'dismissCleanup', courseName: name })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          renderPendingCleanup(data.pending);
+          toast('已標記「' + name + '」清理完成');
+        } else {
+          btnEl.disabled = false;
+          toast('操作失敗,請再試一次');
+        }
+      })
+      .catch(function () {
+        btnEl.disabled = false;
+        toast('離線中,請連網後再試');
       });
   }
 
@@ -669,6 +751,7 @@
   updateNetInfo();
   refreshQueueInfo();
   refreshCourses();
+  refreshPendingCleanup();
   processQueue();
 
   if ('serviceWorker' in navigator) {
