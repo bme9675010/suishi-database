@@ -78,6 +78,39 @@ function setCourses(list) {
   Logger.log('課程清單已更新: ' + list.join('、'));
 }
 
+/**
+ * 一次性補登記工具:把 Drive「隨時資料庫」底下現有的課程資料夾(排除 _收件夾),
+ * 補進課程清單。用在:改用「錄音自動同步課程標籤」這個功能之前就已經手動建立、
+ * 但清單裡沒登記的舊課程資料夾。重複執行是安全的,已經登記過的不會重複加入。
+ */
+function syncCoursesFromFolders() {
+  const props = PropertiesService.getScriptProperties();
+  const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
+  const inboxId = props.getProperty('INBOX_FOLDER_ID');
+
+  const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
+  const lowerSet = {};
+  courses.forEach(function (c) { lowerSet[c.toLowerCase()] = true; });
+
+  const added = [];
+  const it = root.getFolders();
+  while (it.hasNext()) {
+    const folder = it.next();
+    if (folder.getId() === inboxId) continue;
+    const name = folder.getName();
+    if (!lowerSet[name.toLowerCase()]) {
+      courses.push(name);
+      lowerSet[name.toLowerCase()] = true;
+      added.push(name);
+    }
+  }
+
+  if (added.length > 0) {
+    props.setProperty('COURSES', JSON.stringify(courses));
+  }
+  Logger.log('同步完成,新增了 ' + added.length + ' 個課程: ' + (added.join('、') || '(無)'));
+}
+
 // ============ Web API ============
 
 /**
