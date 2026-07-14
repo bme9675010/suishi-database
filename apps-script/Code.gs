@@ -238,6 +238,20 @@ function normalizeTag(tag, props) {
 const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', doc: '文件' };
 
 /**
+ * 如果這個標籤(忽略大小寫)還沒登記在課程清單裡,自動加進去。
+ * 讓「錄音手動打新課程名稱 → 自動建資料夾」跟「App 課程清單」保持同步,
+ * 不會出現 Drive 已經有資料夾、但 App 選單看不到的情況。
+ */
+function registerCourseIfNew(tag, props) {
+  const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
+  const exists = courses.some(function (c) { return c.toLowerCase() === tag.toLowerCase(); });
+  if (!exists) {
+    courses.push(tag);
+    props.setProperty('COURSES', JSON.stringify(courses));
+  }
+}
+
+/**
  * 把一個 blob 歸檔到 隨時資料庫/課程/年/月/類型/,改成統一命名規則,並寫入索引表一列。
  */
 function fileIntoLibrary(blob, type, tag, source) {
@@ -249,6 +263,7 @@ function fileIntoLibrary(blob, type, tag, source) {
   const mm = Utilities.formatDate(now, 'Asia/Taipei', 'MM');
   const typeFolderName = TYPE_FOLDER_NAME[type] || '其他';
   const safeTag = String(tag || '未分類').replace(/[\\\/:*?"<>|]/g, '');
+  registerCourseIfNew(safeTag, props);
 
   const courseFolder = getOrCreateFolder(root, safeTag);
   const yearFolder = getOrCreateFolder(courseFolder, yyyy);
