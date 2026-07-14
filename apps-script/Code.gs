@@ -66,6 +66,17 @@ function installTriggers() {
 }
 
 /**
+ * 安裝「每天自動清理一次索引表失效紀錄」的排程。只需執行一次(重跑會先清掉舊的再裝新的,不會重複)。
+ */
+function installCleanupTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'cleanupDeadIndexRows') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('cleanupDeadIndexRows').timeBased().everyDays(1).atHour(3).create();
+  Logger.log('已安裝排程:每天凌晨 3 點自動清理一次索引表失效紀錄。');
+}
+
+/**
  * 設定/更新課程標籤清單。之後想增減課程,改這裡重跑就好,
  * PWA 跟 iOS 捷徑(若用動態版本)都會抓到最新清單。
  * 範例: setCourses(['未分類', 'RAG課', 'Agent課', 'LLM微調課'])
@@ -114,6 +125,7 @@ function syncCoursesFromFolders() {
 /**
  * 清理工具:掃描索引表,把 Drive 連結已經失效(檔案被刪除或移到垃圾桶)的列自動刪除。
  * 只會刪除索引表裡的「列」,不會動到 Drive 裡任何實際檔案。可以重複執行,執行完看執行紀錄。
+ * 執行 installCleanupTrigger() 一次可以裝上每天自動跑一次的排程,之後也能隨時手動再跑。
  */
 function cleanupDeadIndexRows() {
   const props = PropertiesService.getScriptProperties();
