@@ -102,8 +102,9 @@ function doGet(e) {
 
 /**
  * POST 端點:
- *   action: 'addCourse' → PWA 新增課程用。Body: { passKey, action, courseName }
- *   (無 action)         → PWA 拍照上傳用。Body: { passKey, filename, mimeType, base64Data, tag }
+ *   action: 'addCourse'    → PWA 新增課程用。Body: { passKey, action, courseName }
+ *   action: 'removeCourse' → PWA 刪除課程用。Body: { passKey, action, courseName }
+ *   (無 action)            → PWA 拍照上傳用。Body: { passKey, filename, mimeType, base64Data, tag }
  */
 function doPost(e) {
   const props = PropertiesService.getScriptProperties();
@@ -117,6 +118,9 @@ function doPost(e) {
 
     if (body.action === 'addCourse') {
       return handleAddCourse(body, props);
+    }
+    if (body.action === 'removeCourse') {
+      return handleRemoveCourse(body, props);
     }
 
     if (!body.base64Data || !body.filename) {
@@ -144,6 +148,19 @@ function handleAddCourse(body, props) {
     courses.push(name);
     props.setProperty('COURSES', JSON.stringify(courses));
   }
+  return jsonResponse({ ok: true, courses: courses });
+}
+
+function handleRemoveCourse(body, props) {
+  const name = String(body.courseName || '').trim();
+  const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
+  const idx = courses.indexOf(name);
+  if (idx === -1) {
+    return jsonResponse({ ok: false, error: 'course not found' });
+  }
+
+  courses.splice(idx, 1);
+  props.setProperty('COURSES', JSON.stringify(courses));
   return jsonResponse({ ok: true, courses: courses });
 }
 

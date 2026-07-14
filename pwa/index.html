@@ -96,9 +96,25 @@
   ul.log .state.err { color: var(--err); }
   .empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
 
+  .footer-links {
+    display: flex; justify-content: center; align-items: center; gap: 8px;
+    margin: 18px 0 30px;
+  }
+  .footer-dot { color: var(--border); font-size: 12px; }
   .settings-link {
     text-align: center; color: var(--muted); font-size: 12px;
-    margin: 18px 0 30px; text-decoration: underline; background: none; border: none;
+    text-decoration: underline; background: none; border: none;
+  }
+
+  ul.manage-course-list { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto; }
+  ul.manage-course-list li {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px;
+  }
+  ul.manage-course-list li:last-child { border-bottom: none; }
+  .delete-course-btn {
+    flex-shrink: 0; border: 1px solid var(--err); color: var(--err); background: none;
+    padding: 5px 10px; border-radius: 8px; font-size: 12px; cursor: pointer;
   }
 
   dialog {
@@ -158,7 +174,11 @@
   <ul class="log" id="logList"><li class="empty">還沒有紀錄</li></ul>
 </div>
 
-<button class="settings-link" id="openSettings">連線設定</button>
+<div class="footer-links">
+  <button class="settings-link" id="openManageCourses">管理課程</button>
+  <span class="footer-dot">·</span>
+  <button class="settings-link" id="openSettings">連線設定</button>
+</div>
 
 <dialog id="settingsDialog">
   <div class="dialog-body">
@@ -182,6 +202,16 @@
     <div class="dialog-actions">
       <button id="cancelAddCourse">取消</button>
       <button class="primary" id="confirmAddCourse">新增</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="manageCoursesDialog">
+  <div class="dialog-body">
+    <h3>管理課程</h3>
+    <ul class="manage-course-list" id="manageCourseList"></ul>
+    <div class="dialog-actions">
+      <button id="closeManageCourses">關閉</button>
     </div>
   </div>
 </dialog>
@@ -212,6 +242,8 @@
   var courseSearchInput = document.getElementById('courseSearchInput');
   var addCourseBtn = document.getElementById('addCourseBtn');
   var courseRecentEl = document.getElementById('courseRecent');
+  var manageCoursesDialog = document.getElementById('manageCoursesDialog');
+  var manageCourseListEl = document.getElementById('manageCourseList');
 
   var activeCourse = localStorage.getItem('activeCourse') || '';
   var recentLog = [];
@@ -297,6 +329,65 @@
         toast('離線中,無法新增課程,請連網後再試');
       });
   });
+
+  // ---------- 管理課程視窗 ----------
+  document.getElementById('openManageCourses').addEventListener('click', function () {
+    if (!isConfigured()) {
+      toast('請先填寫連線設定');
+      return;
+    }
+    renderManageCourseList();
+    manageCoursesDialog.showModal();
+  });
+  document.getElementById('closeManageCourses').addEventListener('click', function () {
+    manageCoursesDialog.close();
+  });
+
+  function renderManageCourseList() {
+    manageCourseListEl.innerHTML = '';
+    if (currentCourses.length === 0) {
+      manageCourseListEl.innerHTML = '<li class="empty">尚無課程</li>';
+      return;
+    }
+    currentCourses.slice().sort(function (a, b) { return a.localeCompare(b, 'zh-Hant'); }).forEach(function (c) {
+      var li = document.createElement('li');
+      var name = document.createElement('span');
+      name.textContent = c;
+      var delBtn = document.createElement('button');
+      delBtn.className = 'delete-course-btn';
+      delBtn.textContent = '刪除';
+      delBtn.addEventListener('click', function () { removeCourse(c, delBtn); });
+      li.appendChild(name);
+      li.appendChild(delBtn);
+      manageCourseListEl.appendChild(li);
+    });
+  }
+
+  function removeCourse(name, btnEl) {
+    if (!confirm('確定要刪除課程「' + name + '」嗎?\n(不會刪除已上傳的照片/錄音,只是之後選單不會再顯示)')) return;
+    btnEl.disabled = true;
+    fetch(settings.gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ passKey: settings.passKey, action: 'removeCourse', courseName: name })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          localStorage.setItem('coursesCache', JSON.stringify(data.courses));
+          renderCourses(data.courses);
+          renderManageCourseList();
+          toast('已刪除課程「' + name + '」');
+        } else {
+          btnEl.disabled = false;
+          toast('刪除失敗:' + (data.error || '未知錯誤'));
+        }
+      })
+      .catch(function () {
+        btnEl.disabled = false;
+        toast('離線中,無法刪除課程,請連網後再試');
+      });
+  }
 
   // ---------- 課程清單 ----------
   var RECENT_THRESHOLD = 6; // 課程數超過這個數字才顯示「最近使用」跟搜尋框的必要性提高
