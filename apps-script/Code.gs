@@ -123,7 +123,8 @@ function syncCoursesFromFolders() {
 }
 
 /**
- * 清理工具:掃描索引表,把 Drive 連結已經失效(檔案被刪除或移到垃圾桶)的列自動刪除。
+ * 清理工具:掃描索引表,把 Drive 連結已經失效(檔案被刪除或移到垃圾桶)的列自動刪除,
+ * 順便檢查「待清理提醒」清單,資料夾如果已經真的被刪除就自動核銷提醒(不用手動按已清理)。
  * 只會刪除索引表裡的「列」,不會動到 Drive 裡任何實際檔案。可以重複執行,執行完看執行紀錄。
  * 執行 installCleanupTrigger() 一次可以裝上每天自動跑一次的排程,之後也能隨時手動再跑。
  */
@@ -157,6 +158,27 @@ function cleanupDeadIndexRows() {
   rowsToDelete.forEach(function (row) { sheet.deleteRow(row); });
 
   Logger.log('清理完成:刪除了 ' + rowsToDelete.length + ' 列失效紀錄。');
+
+  autoResolvePendingCleanup(props);
+}
+
+/**
+ * 檢查「待清理提醒」清單裡的課程,如果 Drive 資料夾已經真的被刪除(不在了),
+ * 自動把提醒拿掉,不用使用者手動按「已清理」。跟 cleanupDeadIndexRows 共用同一個每日排程。
+ */
+function autoResolvePendingCleanup(props) {
+  const pending = JSON.parse(props.getProperty('PENDING_CLEANUP') || '[]');
+  if (pending.length === 0) return;
+
+  const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
+  const stillPending = pending.filter(function (p) {
+    return root.getFoldersByName(p.name).hasNext();
+  });
+
+  if (stillPending.length !== pending.length) {
+    props.setProperty('PENDING_CLEANUP', JSON.stringify(stillPending));
+    Logger.log('待清理提醒自動核銷 ' + (pending.length - stillPending.length) + ' 筆(資料夾已確認刪除)。');
+  }
 }
 
 function extractFileId(url) {
