@@ -111,6 +111,48 @@ function syncCoursesFromFolders() {
   Logger.log('同步完成,新增了 ' + added.length + ' 個課程: ' + (added.join('、') || '(無)'));
 }
 
+/**
+ * 清理工具:掃描索引表,把 Drive 連結已經失效(檔案被刪除或移到垃圾桶)的列自動刪除。
+ * 只會刪除索引表裡的「列」,不會動到 Drive 裡任何實際檔案。可以重複執行,執行完看執行紀錄。
+ */
+function cleanupDeadIndexRows() {
+  const props = PropertiesService.getScriptProperties();
+  const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    Logger.log('索引表沒有資料列,不用清理。');
+    return;
+  }
+
+  const urls = sheet.getRange(2, 5, lastRow - 1, 1).getValues(); // E欄 = Drive連結
+  const rowsToDelete = [];
+
+  for (let i = 0; i < urls.length; i++) {
+    const id = extractFileId(urls[i][0]);
+    if (!id) continue; // 抓不到 ID 的列不動它,保守處理
+
+    let dead = false;
+    try {
+      dead = DriveApp.getFileById(id).isTrashed();
+    } catch (err) {
+      dead = true; // 找不到檔案,視為已刪除
+    }
+
+    if (dead) rowsToDelete.push(i + 2); // +2: 資料從第 2 列開始、陣列從 0 起算
+  }
+
+  rowsToDelete.sort(function (a, b) { return b - a; }); // 由下往上刪,避免刪除後列號跑掉
+  rowsToDelete.forEach(function (row) { sheet.deleteRow(row); });
+
+  Logger.log('清理完成:刪除了 ' + rowsToDelete.length + ' 列失效紀錄。');
+}
+
+function extractFileId(url) {
+  if (!url) return null;
+  const m = String(url).match(/\/d\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
 // ============ Web API ============
 
 /**
