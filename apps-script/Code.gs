@@ -174,9 +174,11 @@ function jsonResponse(obj) {
  * 由排程每 5 分鐘呼叫一次。掃描收件夾,把每個檔案歸檔到
  * 隨時資料庫/課程/年/月/類型/ 底下,並寫入索引表,最後把收件夾裡的原檔丟到垃圾桶。
  *
- * 檔名慣例(iOS 捷徑會自動照這個規則命名):
- *   REC__<課程標籤>__<任意文字>.副檔名
- * 沒有照這個規則命名的檔案,標籤會自動歸類為「未分類」,不會出錯。
+ * 檔名慣例(手動存進 Drive 時用):
+ *   直接把檔名打成課程名稱就好,例如「python網路爬蟲.m4a」→ 課程標籤就是「python網路爬蟲」
+ *   (舊的 REC__<課程標籤>__<任意文字> 格式也還支援,優先判斷)
+ * 完全沒改檔名(保留原始語音備忘錄檔名)的話,標籤會直接用那個原始檔名,不會出錯,
+ * 只是之後不好分類,建議還是花兩秒改一下檔名。
  */
 function scanInbox() {
   const props = PropertiesService.getScriptProperties();
@@ -198,7 +200,12 @@ function processInboxFile(file) {
 
   let tag = '未分類';
   const m = name.match(/^REC__(.+?)__/);
-  if (m) tag = m[1];
+  if (m) {
+    tag = m[1];
+  } else {
+    const base = name.indexOf('.') >= 0 ? name.substring(0, name.lastIndexOf('.')) : name;
+    if (base.trim()) tag = base.trim();
+  }
 
   const mime = file.getMimeType();
   let type = 'doc';
