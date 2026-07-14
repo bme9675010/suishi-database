@@ -172,7 +172,7 @@ function jsonResponse(obj) {
 
 /**
  * 由排程每 5 分鐘呼叫一次。掃描收件夾,把每個檔案歸檔到
- * 隨時資料庫/年/月/類型/ 底下,並寫入索引表,最後把收件夾裡的原檔丟到垃圾桶。
+ * 隨時資料庫/課程/年/月/類型/ 底下,並寫入索引表,最後把收件夾裡的原檔丟到垃圾桶。
  *
  * 檔名慣例(iOS 捷徑會自動照這個規則命名):
  *   REC__<課程標籤>__<任意文字>.副檔名
@@ -216,7 +216,7 @@ function processInboxFile(file) {
 const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', doc: '文件' };
 
 /**
- * 把一個 blob 歸檔到 隨時資料庫/年/月/類型/,改成統一命名規則,並寫入索引表一列。
+ * 把一個 blob 歸檔到 隨時資料庫/課程/年/月/類型/,改成統一命名規則,並寫入索引表一列。
  */
 function fileIntoLibrary(blob, type, tag, source) {
   const props = PropertiesService.getScriptProperties();
@@ -226,13 +226,14 @@ function fileIntoLibrary(blob, type, tag, source) {
   const yyyy = Utilities.formatDate(now, 'Asia/Taipei', 'yyyy');
   const mm = Utilities.formatDate(now, 'Asia/Taipei', 'MM');
   const typeFolderName = TYPE_FOLDER_NAME[type] || '其他';
+  const safeTag = String(tag || '未分類').replace(/[\\\/:*?"<>|]/g, '');
 
-  const yearFolder = getOrCreateFolder(root, yyyy);
+  const courseFolder = getOrCreateFolder(root, safeTag);
+  const yearFolder = getOrCreateFolder(courseFolder, yyyy);
   const monthFolder = getOrCreateFolder(yearFolder, mm);
   const typeFolder = getOrCreateFolder(monthFolder, typeFolderName);
 
   const stamp = Utilities.formatDate(now, 'Asia/Taipei', 'yyyyMMdd_HHmm');
-  const safeTag = String(tag || '未分類').replace(/[\\\/:*?"<>|]/g, '');
   const originalName = blob.getName() || '';
   const ext = originalName.indexOf('.') >= 0 ? originalName.split('.').pop() : '';
   const newName = typeFolderName + '_' + stamp + '_' + safeTag + (ext ? '.' + ext : '');
@@ -250,4 +251,67 @@ function getOrCreateFolder(parent, name) {
   const it = parent.getFoldersByName(name);
   if (it.hasNext()) return it.next();
   return parent.createFolder(name);
+}
+
+// ============ 一次性搬移工具(舊結構 年/月/類型 → 新結構 課程/年/月/類型) ============
+
+/**
+ * 只需執行一次。掃描舊的「隨時資料庫/年/月/類型/檔案」結構,
+ * 從檔名解析出課程標籤,搬到新的「隨時資料庫/課程/年/月/類型/檔案」結構,
+ * 最後把搬空的舊資料夾清掉。執行完看「執行紀錄」確認搬移數量。
+ * 重複執行是安全的(已經搬過的檔案不會再被找到,不會重複處理)。
+ */
+function migrateToCourseFolders() {
+  const props = PropertiesService.getScriptProperties();
+  const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
+  const inboxId = props.getProperty('INBOX_FOLDER_ID');
+  const nameRe = /^.+?_\d{8}_\d{4}_(.+)\.[A-Za-z0-9]+$/;
+
+  let moved = 0;
+
+  const yearFolders = root.getFolders();
+  while (yearFolders.hasNext()) {
+    const yearFolder = yearFolders.next();
+    if (!/^\d{4}$/.test(yearFolder.getName())) continue; // 只處理年份資料夾(4位數字),避免誤動到課程資料夾
+
+    const monthFolders = yearFolder.getFolders();
+    while (monthFolders.hasNext()) {
+      const monthFolder = monthFolders.next();
+      const typeFolders = monthFolder.getFolders();
+      while (typeFolders.hasNext()) {
+        const typeFolder = typeFolders.next();
+        const files = typeFolder.getFiles();
+        while (files.hasNext()) {
+          const file = files.next();
+          const m = file.getName().match(nameRe);
+          const tag = m ? m[1] : '未分類';
+
+          const courseFolder = getOrCreateFolder(root, tag);
+          const newYearFolder = getOrCreateFolder(courseFolder, yearFolder.getName());
+          const newMonthFolder = getOrCreateFolder(newYearFolder, monthFolder.getName());
+          const newTypeFolder = getOrCreateFolder(newMonthFolder, typeFolder.getName());
+
+          file.moveTo(newTypeFolder);
+          moved++;
+        }
+      }
+    }
+  }
+
+  cleanupEmptyFolders(root, inboxId);
+  Logger.log('搬移完成:共搬移 ' + moved + ' 個檔案,舊的空資料夾已清除。');
+}
+
+function cleanupEmptyFolders(folder, protectedId) {
+  const subfolders = [];
+  const it = folder.getFolders();
+  while (it.hasNext()) subfolders.push(it.next());
+
+  subfolders.forEach(function (sub) {
+    if (sub.getId() === protectedId) return;
+    cleanupEmptyFolders(sub, protectedId);
+    if (!sub.getFiles().hasNext() && !sub.getFolders().hasNext()) {
+      sub.setTrashed(true);
+    }
+  });
 }
