@@ -625,7 +625,7 @@ function cleanupEmptyFolders(folder, protectedId) {
  *
  * 只會動索引表的「列」跟課程清單,不會刪除或搬動 Drive 裡任何實際檔案。可以重複執行,回傳 { added, removed }。
  * 三種觸發方式,不用再開編輯器手動跑:
- *   - App 底部「同步」按鈕 → doPost action:'reconcile' 即時呼叫(手機上點一下就同步)
+ *   - App 打開或從其他 App 切回來時,背景自動呼叫 doPost action:'reconcile'(靜默,有變更才提示)
  *   - 每天凌晨 3 點自動排程(installCleanupTrigger 安裝)
  *   - 需要時仍可在編輯器函式下拉選 reconcileIndex → 按「執行」
  * 適用情境:你習慣直接在 Drive 整理檔案(新增或刪除),同步後 App 瀏覽跟索引表就對得上。
