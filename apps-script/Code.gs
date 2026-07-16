@@ -108,6 +108,7 @@ function syncCoursesFromFolders() {
   while (it.hasNext()) {
     const folder = it.next();
     if (folder.getId() === inboxId) continue;
+    if (folder.isTrashed()) continue; // 垃圾桶裡的資料夾不算,避免把剛刪掉的課程又補回清單
     const name = folder.getName();
     if (!lowerSet[name.toLowerCase()]) {
       courses.push(name);
@@ -184,13 +185,26 @@ function autoResolvePendingCleanup(props) {
 
   const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
   const stillPending = pending.filter(function (p) {
-    return root.getFoldersByName(p.name).hasNext();
+    return activeFolderExists(root, p.name);
   });
 
   if (stillPending.length !== pending.length) {
     props.setProperty('PENDING_CLEANUP', JSON.stringify(stillPending));
     Logger.log('待清理提醒自動核銷 ' + (pending.length - stillPending.length) + ' 筆(資料夾已確認刪除)。');
   }
+}
+
+/**
+ * 判斷 root 底下是否有名稱為 name、且「還沒被刪除」的資料夾。
+ * 重要:Apps Script 的 getFoldersByName() 連丟進垃圾桶(還沒永久刪除)的資料夾也會回傳,
+ * 所以一定要額外用 isTrashed() 過濾,否則「移到垃圾桶」會被誤判成資料夾還在。
+ */
+function activeFolderExists(root, name) {
+  const it = root.getFoldersByName(name);
+  while (it.hasNext()) {
+    if (!it.next().isTrashed()) return true;
+  }
+  return false;
 }
 
 function extractFileId(url) {
@@ -223,6 +237,16 @@ function doGet(e) {
   if (action === 'pendingCleanup') {
     if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
       return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
+    // 自我修復:App 每次抓提醒清單時,順手檢查一下資料夾是不是其實已經刪掉了(含丟進垃圾桶),
+    // 是的話當場核銷,不用等每天凌晨 3 點的排程,體驗上等於「刪掉後重開 App 提醒就消失」。
+    const lock = LockService.getScriptLock();
+    if (lock.tryLock(5000)) {
+      try {
+        autoResolvePendingCleanup(props);
+      } finally {
+        lock.releaseLock();
+      }
     }
     const pending = JSON.parse(props.getProperty('PENDING_CLEANUP') || '[]');
     return jsonResponse({ ok: true, pending: pending });
@@ -345,7 +369,7 @@ function handleRemoveCourse(body, props) {
   // 如果 Drive 裡這個課程還有實際資料夾(代表真的有存過檔案),記一筆待清理提醒
   const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
   let pending = JSON.parse(props.getProperty('PENDING_CLEANUP') || '[]');
-  if (root.getFoldersByName(actualName).hasNext() && !pending.some(function (p) { return p.name.toLowerCase() === actualName.toLowerCase(); })) {
+  if (activeFolderExists(root, actualName) && !pending.some(function (p) { return p.name.toLowerCase() === actualName.toLowerCase(); })) {
     pending.push({ name: actualName, removedAt: new Date().toISOString() });
     props.setProperty('PENDING_CLEANUP', JSON.stringify(pending));
   }
