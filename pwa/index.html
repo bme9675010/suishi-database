@@ -170,6 +170,15 @@
   }
   .dialog-actions button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 700; }
 
+  .sync-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .sync-section .hint { font-size: 11px; color: var(--muted); margin: 0 0 8px; }
+  .sync-status { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  .sync-now-btn {
+    width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--accent);
+    background: transparent; color: var(--accent); font-size: 14px;
+  }
+  .sync-now-btn:disabled { opacity: .5; }
+
   #toast {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
     background: #111827; color: var(--text); padding: 10px 16px; border-radius: 10px;
@@ -231,6 +240,11 @@
     <div class="dialog-actions">
       <button id="cancelSettings">取消</button>
       <button class="primary" id="saveSettings">儲存</button>
+    </div>
+    <div class="sync-section">
+      <p class="hint">平常打開 App 會自動同步 Drive 變更,這裡是備援:需要時手動更新,或檢查自動同步有沒有正常運作。</p>
+      <div class="sync-status" id="syncStatus">自動同步狀態:—</div>
+      <button class="sync-now-btn" id="syncNowBtn">立即同步 Drive</button>
     </div>
   </div>
 </dialog>
@@ -318,7 +332,11 @@
   document.getElementById('openSettings').addEventListener('click', function () {
     document.getElementById('gasUrlInput').value = settings.gasUrl;
     document.getElementById('passKeyInput').value = settings.passKey;
+    renderSyncStatus();
     settingsDialog.showModal();
+  });
+  document.getElementById('syncNowBtn').addEventListener('click', function () {
+    runSync({ manual: true, force: true });
   });
   document.getElementById('cancelSettings').addEventListener('click', function () {
     settingsDialog.close();
@@ -400,17 +418,51 @@
     manageCoursesDialog.close();
   });
 
-  // ---------- 背景自動同步(對帳)----------
-  // 打開 App、或從其他 App 切回來時,在背景靜默對帳一次:把你直接在 Drive 新增/刪除的檔案
-  // 跟索引表對齊,讓瀏覽看得到最新內容。只有真的有變更才跳提示,平常無感;離線則安靜略過。
+  // ---------- 同步(對帳)----------
+  // 主力:打開 App / 從其他 App 切回來時,背景靜默對帳,把你直接在 Drive 新增/刪除的檔案跟索引表對齊。
+  // 備援:連線設定裡的「立即同步」按鈕(manual+force),以防背景同步遇到暫時性問題(離線、伺服器忙、
+  // 部署中)而你需要手動觸發;同時記錄上次同步狀態,讓你看得出自動同步有沒有在正常運作。
   var lastAutoSync = 0;
   var AUTO_SYNC_MIN_GAP = 60000; // 至少間隔 60 秒才會再自動同步一次,避免頻繁切換 App 一直觸發全樹掃描
 
-  function autoSync() {
-    if (!isConfigured() || !navigator.onLine) return;
+  function setSyncStatus(state, added, removed) {
+    var rec = { t: Date.now(), state: state };
+    if (typeof added === 'number') { rec.added = added; rec.removed = removed; }
+    localStorage.setItem('lastSync', JSON.stringify(rec));
+    renderSyncStatus();
+  }
+
+  function renderSyncStatus() {
+    var el = document.getElementById('syncStatus');
+    if (!el) return;
+    var raw = localStorage.getItem('lastSync');
+    if (!raw) { el.textContent = '自動同步狀態:尚未同步過'; return; }
+    try {
+      var r = JSON.parse(raw);
+      var when = new Date(r.t).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+      if (r.state === 'ok') {
+        var change = (r.added || r.removed) ? '(補登 ' + r.added + '、清除 ' + r.removed + ')' : '(無變更)';
+        el.textContent = '上次同步:' + when + ' · 成功 ' + change;
+      } else {
+        el.textContent = '上次同步:' + when + ' · 失敗,請檢查網路或 Apps Script 部署';
+      }
+    } catch (e) { el.textContent = '自動同步狀態:—'; }
+  }
+
+  // opts.manual = 手動觸發(顯示按鈕狀態與各種提示);opts.force = 略過 60 秒去抖動
+  function runSync(opts) {
+    opts = opts || {};
+    if (!isConfigured()) { if (opts.manual) toast('請先填寫連線設定'); return; }
+    if (!navigator.onLine) { if (opts.manual) toast('離線中,無法同步,請連網後再試'); return; }
     var now = Date.now();
-    if (now - lastAutoSync < AUTO_SYNC_MIN_GAP) return;
+    if (!opts.force && now - lastAutoSync < AUTO_SYNC_MIN_GAP) return;
     lastAutoSync = now;
+
+    var btn = document.getElementById('syncNowBtn');
+    var label = null;
+    if (opts.manual && btn) { label = btn.textContent; btn.textContent = '同步中…'; btn.disabled = true; }
+    function restoreBtn() { if (opts.manual && btn) { btn.textContent = label; btn.disabled = false; } }
+
     fetch(settings.gasUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -418,14 +470,29 @@
     })
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        if (data.ok && (data.added > 0 || data.removed > 0)) {
-          refreshCourses();
-          refreshPendingCleanup();
-          toast('已同步 Drive 變更:補登 ' + data.added + ' 筆、清除 ' + data.removed + ' 筆');
+        restoreBtn();
+        if (data.ok) {
+          setSyncStatus('ok', data.added, data.removed);
+          if (data.added > 0 || data.removed > 0) {
+            refreshCourses();
+            refreshPendingCleanup();
+            toast('已同步 Drive 變更:補登 ' + data.added + ' 筆、清除 ' + data.removed + ' 筆');
+          } else if (opts.manual) {
+            toast('已是最新,沒有變更');
+          }
+        } else {
+          setSyncStatus('fail');
+          if (opts.manual) toast('同步失敗:' + (data.error === 'server busy, please retry' ? '伺服器忙碌中,請稍後再試' : (data.error || '未知錯誤')));
         }
       })
-      .catch(function () {}); // 背景同步,失敗就安靜略過,不打擾使用者
+      .catch(function () {
+        restoreBtn();
+        setSyncStatus('fail'); // 背景失敗不跳提示,但記錄下來,連線設定裡看得到
+        if (opts.manual) toast('離線中,無法同步,請連網後再試');
+      });
   }
+
+  function autoSync() { runSync(); }
 
   function renderManageCourseList() {
     manageCourseListEl.innerHTML = '';
