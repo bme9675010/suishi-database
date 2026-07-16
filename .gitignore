@@ -1,0 +1,7 @@
+# 本機測試/除錯用的暫存檔,不要進 repo
+debug/
+Code_check_tmp.js
+
+# 系統/編輯器雜項
+.DS_Store
+Thumbs.db

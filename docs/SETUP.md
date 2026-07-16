@@ -35,6 +35,11 @@
 1. 函式下拉選單改選 `installTriggers`,按「執行」
 2. 執行記錄顯示「已安裝排程」即完成 — 之後收件夾裡的錄音檔會每 5 分鐘自動被歸檔一次
 
+### A-4b. 安裝自動清理排程
+
+1. 函式下拉選單改選 `installCleanupTrigger`,按「執行」
+2. 執行記錄顯示「已安裝排程」即完成 — 之後每天凌晨 3 點會自動清掉索引表裡連結已失效的列,也會自動核銷「待清理提醒」(手動去 Drive 刪掉課程資料夾後,提醒會在隔天自動消失,不用在 App 裡按「已清理」)
+
 ### A-5. 設定課程清單
 
 1. 函式下拉選單改選 `setCourses`,**不要直接執行**,因為要先改參數
@@ -85,12 +90,13 @@ git push -u origin main
 
 ### B-2. 開啟 GitHub Pages
 
+GitHub Pages 的「Deploy from a branch」不支援選任意子資料夾(只能選 root 或 `/docs`),但我們的 PWA 檔案放在 `pwa/` 子資料夾,所以改用 repo 裡已經寫好的 **GitHub Actions 流程**([.github/workflows/deploy-pwa.yml](../.github/workflows/deploy-pwa.yml))自動部署,push 到 `main` 就會自動把 `pwa/` 部署上去,不用每次手動操作。
+
 1. repo 頁面 → Settings → Pages
-2. Source 選「Deploy from a branch」
-3. Branch 選 `main`,資料夾選 `/pwa`(注意不是 root,因為 PWA 檔案在子資料夾)
-   - 如果 GitHub Pages 設定不給選子資料夾,改用 GitHub Actions 部署,或是把 `pwa/` 內容整個搬到 repo 根目錄再 push
-4. 存檔後等 1~2 分鐘,會出現網址,例如:
+2. Source 選「**GitHub Actions**」(不是「Deploy from a branch」)
+3. 存回 B-1 的 push 完成後,repo 頁面 → Actions 分頁應該會看到「Deploy PWA to GitHub Pages」這個工作流程自動跑起來,跑完後回 Settings → Pages 就會出現網址,例如:
    `https://<你的帳號>.github.io/suishi-database/`
+4. 之後只要 `pwa/` 資料夾有變動並 push 到 `main`,就會自動重新部署,不用再手動按什麼
 
 ### B-3. 手機上設定並加到主畫面
 
@@ -109,7 +115,7 @@ git push -u origin main
 - [ ] 打開 PWA,課程按鈕有正常出現(不是「載入中」卡住)
 - [ ] 拍一張照片,幾秒後「最近上傳」出現「已上傳」
 - [ ] 打開 Drive 的索引表,有新的一列資料
-- [ ] 打開 Drive 資料夾,照片確實在 `隨時資料庫/年/月/照片/` 底下
+- [ ] 打開 Drive 資料夾,照片確實在 `隨時資料庫/課程名稱/年/月/照片/` 底下
 
 如果卡在「排隊中」不會變「已上傳」,最常見原因是 PASS_KEY 或 GAS_URL 打錯,或是部署權限沒選「任何人」— 回頭檢查 A-6。
 

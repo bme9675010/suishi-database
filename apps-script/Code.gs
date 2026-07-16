@@ -129,37 +129,49 @@ function syncCoursesFromFolders() {
  * 執行 installCleanupTrigger() 一次可以裝上每天自動跑一次的排程,之後也能隨時手動再跑。
  */
 function cleanupDeadIndexRows() {
-  const props = PropertiesService.getScriptProperties();
-  const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) {
-    Logger.log('索引表沒有資料列,不用清理。');
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (err) {
+    Logger.log('cleanupDeadIndexRows 取得鎖定逾時,可能跟其他排程/請求撞期,略過這次,下次排程會再試。');
     return;
   }
 
-  const urls = sheet.getRange(2, 5, lastRow - 1, 1).getValues(); // E欄 = Drive連結
-  const rowsToDelete = [];
-
-  for (let i = 0; i < urls.length; i++) {
-    const id = extractFileId(urls[i][0]);
-    if (!id) continue; // 抓不到 ID 的列不動它,保守處理
-
-    let dead = false;
-    try {
-      dead = DriveApp.getFileById(id).isTrashed();
-    } catch (err) {
-      dead = true; // 找不到檔案,視為已刪除
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      Logger.log('索引表沒有資料列,不用清理。');
+      return;
     }
 
-    if (dead) rowsToDelete.push(i + 2); // +2: 資料從第 2 列開始、陣列從 0 起算
+    const urls = sheet.getRange(2, 5, lastRow - 1, 1).getValues(); // E欄 = Drive連結
+    const rowsToDelete = [];
+
+    for (let i = 0; i < urls.length; i++) {
+      const id = extractFileId(urls[i][0]);
+      if (!id) continue; // 抓不到 ID 的列不動它,保守處理
+
+      let dead = false;
+      try {
+        dead = DriveApp.getFileById(id).isTrashed();
+      } catch (err) {
+        dead = true; // 找不到檔案,視為已刪除
+      }
+
+      if (dead) rowsToDelete.push(i + 2); // +2: 資料從第 2 列開始、陣列從 0 起算
+    }
+
+    rowsToDelete.sort(function (a, b) { return b - a; }); // 由下往上刪,避免刪除後列號跑掉
+    rowsToDelete.forEach(function (row) { sheet.deleteRow(row); });
+
+    Logger.log('清理完成:刪除了 ' + rowsToDelete.length + ' 列失效紀錄。');
+
+    autoResolvePendingCleanup(props);
+  } finally {
+    lock.releaseLock();
   }
-
-  rowsToDelete.sort(function (a, b) { return b - a; }); // 由下往上刪,避免刪除後列號跑掉
-  rowsToDelete.forEach(function (row) { sheet.deleteRow(row); });
-
-  Logger.log('清理完成:刪除了 ' + rowsToDelete.length + ' 列失效紀錄。');
-
-  autoResolvePendingCleanup(props);
 }
 
 /**
@@ -259,6 +271,12 @@ function getFilesForCourse(courseName, props) {
  */
 function doPost(e) {
   const props = PropertiesService.getScriptProperties();
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (err) {
+    return jsonResponse({ ok: false, error: 'server busy, please retry' });
+  }
 
   try {
     const body = JSON.parse(e.postData.contents);
@@ -288,6 +306,8 @@ function doPost(e) {
     return jsonResponse({ ok: true, url: result.url, name: result.name });
   } catch (err) {
     return jsonResponse({ ok: false, error: String(err) });
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -313,10 +333,11 @@ function handleAddCourse(body, props) {
 function handleRemoveCourse(body, props) {
   const name = String(body.courseName || '').trim();
   const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
-  const idx = courses.indexOf(name);
+  const idx = courses.findIndex(function (c) { return c.toLowerCase() === name.toLowerCase(); });
   if (idx === -1) {
     return jsonResponse({ ok: false, error: 'course not found' });
   }
+  const actualName = courses[idx]; // 用清單裡登記的大小寫版本,跟 Drive 資料夾名稱、待清理提醒保持一致
 
   courses.splice(idx, 1);
   props.setProperty('COURSES', JSON.stringify(courses));
@@ -324,8 +345,8 @@ function handleRemoveCourse(body, props) {
   // 如果 Drive 裡這個課程還有實際資料夾(代表真的有存過檔案),記一筆待清理提醒
   const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
   let pending = JSON.parse(props.getProperty('PENDING_CLEANUP') || '[]');
-  if (root.getFoldersByName(name).hasNext() && !pending.some(function (p) { return p.name === name; })) {
-    pending.push({ name: name, removedAt: new Date().toISOString() });
+  if (root.getFoldersByName(actualName).hasNext() && !pending.some(function (p) { return p.name.toLowerCase() === actualName.toLowerCase(); })) {
+    pending.push({ name: actualName, removedAt: new Date().toISOString() });
     props.setProperty('PENDING_CLEANUP', JSON.stringify(pending));
   }
 
@@ -367,17 +388,29 @@ function jsonResponse(obj) {
  * 只是之後不好分類,建議還是花兩秒改一下檔名。
  */
 function scanInbox() {
-  const props = PropertiesService.getScriptProperties();
-  const inbox = DriveApp.getFolderById(props.getProperty('INBOX_FOLDER_ID'));
-  const files = inbox.getFiles();
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (err) {
+    Logger.log('scanInbox 取得鎖定逾時,可能跟其他排程/請求撞期,略過這次,下次排程會再試。');
+    return;
+  }
 
-  while (files.hasNext()) {
-    const file = files.next();
-    try {
-      processInboxFile(file, props);
-    } catch (err) {
-      Logger.log('處理失敗: ' + file.getName() + ' - ' + err);
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const inbox = DriveApp.getFolderById(props.getProperty('INBOX_FOLDER_ID'));
+    const files = inbox.getFiles();
+
+    while (files.hasNext()) {
+      const file = files.next();
+      try {
+        processInboxFile(file, props);
+      } catch (err) {
+        Logger.log('處理失敗: ' + file.getName() + ' - ' + err);
+      }
     }
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -449,7 +482,7 @@ function fileIntoLibrary(blob, type, tag, source) {
   const yyyy = Utilities.formatDate(now, 'Asia/Taipei', 'yyyy');
   const mm = Utilities.formatDate(now, 'Asia/Taipei', 'MM');
   const typeFolderName = TYPE_FOLDER_NAME[type] || '其他';
-  const safeTag = String(tag || '未分類').replace(/[\\\/:*?"<>|]/g, '');
+  const safeTag = String(tag || '未分類').replace(/[\\\/:*?"<>|]/g, '') || '未分類';
   registerCourseIfNew(safeTag, props);
 
   const courseFolder = getOrCreateFolder(root, safeTag);
