@@ -218,6 +218,8 @@
 <div class="footer-links">
   <button class="settings-link" id="openManageCourses">管理課程</button>
   <span class="footer-dot">·</span>
+  <button class="settings-link" id="syncBtn">同步 Drive</button>
+  <span class="footer-dot">·</span>
   <button class="settings-link" id="openSettings">連線設定</button>
 </div>
 
@@ -398,6 +400,42 @@
   });
   document.getElementById('closeManageCourses').addEventListener('click', function () {
     manageCoursesDialog.close();
+  });
+
+  // ---------- 同步 Drive(對帳) ----------
+  // 你直接在 Drive 新增/刪除檔案後,點這顆讓索引表跟 App 瀏覽對得上;
+  // 後端做全樹掃描可能要幾秒,期間按鈕顯示「同步中…」。
+  var syncBtn = document.getElementById('syncBtn');
+  syncBtn.addEventListener('click', function () {
+    if (!isConfigured()) {
+      toast('請先填寫連線設定');
+      return;
+    }
+    var original = syncBtn.textContent;
+    syncBtn.textContent = '同步中…';
+    syncBtn.disabled = true;
+    fetch(settings.gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ passKey: settings.passKey, action: 'reconcile' })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        syncBtn.textContent = original;
+        syncBtn.disabled = false;
+        if (data.ok) {
+          toast('同步完成:補登 ' + data.added + ' 筆、清除 ' + data.removed + ' 筆');
+          refreshCourses();
+          refreshPendingCleanup();
+        } else {
+          toast('同步失敗:' + (data.error === 'server busy, please retry' ? '伺服器忙碌中,請稍後再試' : (data.error || '未知錯誤')));
+        }
+      })
+      .catch(function () {
+        syncBtn.textContent = original;
+        syncBtn.disabled = false;
+        toast('離線中,無法同步,請連網後再試');
+      });
   });
 
   function renderManageCourseList() {

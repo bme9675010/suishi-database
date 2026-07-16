@@ -66,14 +66,17 @@ function installTriggers() {
 }
 
 /**
- * 安裝「每天自動清理一次索引表失效紀錄」的排程。只需執行一次(重跑會先清掉舊的再裝新的,不會重複)。
+ * 安裝「每天凌晨 3 點自動對帳一次」的排程。只需執行一次(重跑會先清掉舊的再裝新的,不會重複)。
+ * 對帳 = 補登直接放進 Drive 的檔案、清掉已刪除的列、同步課程清單、核銷待清理提醒(見 reconcileIndex)。
+ * (舊版本這個排程只跑 cleanupDeadIndexRows,重跑本函式會自動把舊排程換成新的全套對帳。)
  */
 function installCleanupTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'cleanupDeadIndexRows') ScriptApp.deleteTrigger(t);
+    const fn = t.getHandlerFunction();
+    if (fn === 'cleanupDeadIndexRows' || fn === 'reconcileIndex') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('cleanupDeadIndexRows').timeBased().everyDays(1).atHour(3).create();
-  Logger.log('已安裝排程:每天凌晨 3 點自動清理一次索引表失效紀錄。');
+  ScriptApp.newTrigger('reconcileIndex').timeBased().everyDays(1).atHour(3).create();
+  Logger.log('已安裝排程:每天凌晨 3 點自動對帳一次(補登新檔、清掉已刪除的、同步課程清單)。');
 }
 
 /**
@@ -295,6 +298,25 @@ function getFilesForCourse(courseName, props) {
  */
 function doPost(e) {
   const props = PropertiesService.getScriptProperties();
+
+  let body;
+  try {
+    body = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return jsonResponse({ ok: false, error: 'bad request' });
+  }
+
+  if (body.passKey !== props.getProperty('PASS_KEY')) {
+    return jsonResponse({ ok: false, error: 'unauthorized' });
+  }
+
+  // reconcile 自己會上鎖、而且全樹掃描可能跑比較久,獨立處理,不佔用下面上傳/課程操作用的共用鎖
+  if (body.action === 'reconcile') {
+    const r = reconcileIndex();
+    if (!r) return jsonResponse({ ok: false, error: 'server busy, please retry' });
+    return jsonResponse({ ok: true, added: r.added, removed: r.removed });
+  }
+
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(10000);
@@ -303,12 +325,6 @@ function doPost(e) {
   }
 
   try {
-    const body = JSON.parse(e.postData.contents);
-
-    if (body.passKey !== props.getProperty('PASS_KEY')) {
-      return jsonResponse({ ok: false, error: 'unauthorized' });
-    }
-
     if (body.action === 'addCourse') {
       return handleAddCourse(body, props);
     }
@@ -605,9 +621,14 @@ function cleanupEmptyFolders(folder, protectedId) {
  *   2. 清除 — 索引表有、但 Drive 檔案已刪除(含丟進垃圾桶)的列,移除
  *   3. 補課程 — 順手把有檔案的課程資料夾補進課程清單(等同 syncCoursesFromFolders)
  *
- * 只會動索引表的「列」跟課程清單,不會刪除或搬動 Drive 裡任何實際檔案。可以重複執行。
- * 執行方式:編輯器函式下拉選單選 reconcileIndex → 按「執行」(不用重新部署),完再看「執行紀錄」看補登/清除數量。
- * 適用情境:你習慣直接在 Drive 整理檔案(新增或刪除),跑一下這個就能讓 App 瀏覽跟索引表對得上。
+ *   4. 核銷 — 順手核銷「資料夾已刪」的待清理提醒(見 autoResolvePendingCleanup)
+ *
+ * 只會動索引表的「列」跟課程清單,不會刪除或搬動 Drive 裡任何實際檔案。可以重複執行,回傳 { added, removed }。
+ * 三種觸發方式,不用再開編輯器手動跑:
+ *   - App 底部「同步」按鈕 → doPost action:'reconcile' 即時呼叫(手機上點一下就同步)
+ *   - 每天凌晨 3 點自動排程(installCleanupTrigger 安裝)
+ *   - 需要時仍可在編輯器函式下拉選 reconcileIndex → 按「執行」
+ * 適用情境:你習慣直接在 Drive 整理檔案(新增或刪除),同步後 App 瀏覽跟索引表就對得上。
  *
  * 註:採全樹掃描,檔案數以個人使用規模(數百~數千)為前提;若之後檔案量非常大,單次執行可能逼近
  *     Apps Script 6 分鐘上限,屆時再改成分批處理。
@@ -618,7 +639,7 @@ function reconcileIndex() {
     lock.waitLock(30000);
   } catch (err) {
     Logger.log('reconcileIndex 取得鎖定逾時,可能有其他排程/請求正在跑,請稍後再試一次。');
-    return;
+    return null;
   }
 
   try {
@@ -693,7 +714,9 @@ function reconcileIndex() {
       sheet.getRange(startRow, 1, newRows.length, newRows[0].length).setValues(newRows);
     }
 
+    autoResolvePendingCleanup(props); // 順手核銷「資料夾已刪」的待清理提醒,讓每日排程做的是全套同步
     Logger.log('對帳完成:補登 ' + newRows.length + ' 筆、清除 ' + rowsToDelete.length + ' 筆失效紀錄。');
+    return { added: newRows.length, removed: rowsToDelete.length };
   } finally {
     lock.releaseLock();
   }
