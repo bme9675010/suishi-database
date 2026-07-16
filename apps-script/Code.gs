@@ -596,3 +596,134 @@ function cleanupEmptyFolders(folder, protectedId) {
     }
   });
 }
+
+// ============ 對帳工具(讓索引表跟 Drive 實際內容完全同步) ============
+
+/**
+ * 對帳工具:掃描每個課程資料夾裡的實際檔案,跟索引表雙向對齊。做三件事:
+ *   1. 補登 — 課程資料夾裡有、但索引表沒登記的檔案(例如你直接把檔案拖進 Drive),補一列進索引表
+ *   2. 清除 — 索引表有、但 Drive 檔案已刪除(含丟進垃圾桶)的列,移除
+ *   3. 補課程 — 順手把有檔案的課程資料夾補進課程清單(等同 syncCoursesFromFolders)
+ *
+ * 只會動索引表的「列」跟課程清單,不會刪除或搬動 Drive 裡任何實際檔案。可以重複執行。
+ * 執行方式:編輯器函式下拉選單選 reconcileIndex → 按「執行」(不用重新部署),完再看「執行紀錄」看補登/清除數量。
+ * 適用情境:你習慣直接在 Drive 整理檔案(新增或刪除),跑一下這個就能讓 App 瀏覽跟索引表對得上。
+ *
+ * 註:採全樹掃描,檔案數以個人使用規模(數百~數千)為前提;若之後檔案量非常大,單次執行可能逼近
+ *     Apps Script 6 分鐘上限,屆時再改成分批處理。
+ */
+function reconcileIndex() {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (err) {
+    Logger.log('reconcileIndex 取得鎖定逾時,可能有其他排程/請求正在跑,請稍後再試一次。');
+    return;
+  }
+
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
+    const inboxId = props.getProperty('INBOX_FOLDER_ID');
+    const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+
+    // 1. 讀出索引表現有的檔案 ID → 列號
+    const lastRow = sheet.getLastRow();
+    const indexById = {}; // fileId -> rowNumber
+    if (lastRow >= 2) {
+      const urls = sheet.getRange(2, 5, lastRow - 1, 1).getValues(); // E欄 = Drive連結
+      for (let i = 0; i < urls.length; i++) {
+        const id = extractFileId(urls[i][0]);
+        if (id) indexById[id] = i + 2;
+      }
+    }
+
+    // 2. 走訪每個課程資料夾(排除收件夾、垃圾桶),收集實際存在的檔案;沒登記到索引表的就準備補登
+    const actualIds = {};
+    const newRows = [];
+    const courseIt = root.getFolders();
+    while (courseIt.hasNext()) {
+      const courseFolder = courseIt.next();
+      if (courseFolder.getId() === inboxId) continue;
+      if (courseFolder.isTrashed()) continue;
+      const courseName = courseFolder.getName();
+      let courseHasFiles = false;
+
+      const files = collectFilesRecursive(courseFolder);
+      for (let j = 0; j < files.length; j++) {
+        const file = files[j];
+        courseHasFiles = true;
+        const id = file.getId();
+        actualIds[id] = true;
+        if (!indexById[id]) {
+          newRows.push([
+            file.getDateCreated(),
+            inferTypeFolderName(file.getMimeType()),
+            courseName,
+            file.getName(),
+            file.getUrl(),
+            '對帳補登',
+            ''
+          ]);
+        }
+      }
+
+      if (courseHasFiles) registerCourseIfNew(courseName, props);
+    }
+
+    // 3. 索引表有、但走訪時沒看到的檔案:逐一用 getFileById 確認是否真的沒了(避免誤刪被移出課程結構的檔案)
+    const rowsToDelete = [];
+    for (const id in indexById) {
+      if (actualIds[id]) continue;
+      let dead = false;
+      try {
+        dead = DriveApp.getFileById(id).isTrashed();
+      } catch (err) {
+        dead = true; // 找不到檔案,視為已刪除
+      }
+      if (dead) rowsToDelete.push(indexById[id]);
+    }
+
+    // 先刪(由下往上,避免列號跑掉),再補登(附加到最下面)
+    rowsToDelete.sort(function (a, b) { return b - a; });
+    rowsToDelete.forEach(function (row) { sheet.deleteRow(row); });
+
+    if (newRows.length > 0) {
+      const startRow = sheet.getLastRow() + 1;
+      sheet.getRange(startRow, 1, newRows.length, newRows[0].length).setValues(newRows);
+    }
+
+    Logger.log('對帳完成:補登 ' + newRows.length + ' 筆、清除 ' + rowsToDelete.length + ' 筆失效紀錄。');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * 遞迴收集 folder 底下(含各層子資料夾)所有「未被丟進垃圾桶」的檔案,回傳 File 陣列。
+ */
+function collectFilesRecursive(folder) {
+  const out = [];
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const f = files.next();
+    if (!f.isTrashed()) out.push(f);
+  }
+  const subs = folder.getFolders();
+  while (subs.hasNext()) {
+    const sub = subs.next();
+    if (sub.isTrashed()) continue;
+    const nested = collectFilesRecursive(sub);
+    for (let i = 0; i < nested.length; i++) out.push(nested[i]);
+  }
+  return out;
+}
+
+/**
+ * 用 MIME 類型推斷索引表「類型」欄要填的中文名稱(照片/錄音/文件),跟收件夾歸檔用的規則一致。
+ */
+function inferTypeFolderName(mime) {
+  if (mime && mime.indexOf('image/') === 0) return '照片';
+  if (mime && (mime.indexOf('audio/') === 0 || mime.indexOf('video/') === 0)) return '錄音';
+  return '文件';
+}
