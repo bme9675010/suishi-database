@@ -312,9 +312,13 @@ function doPost(e) {
 
   // reconcile 自己會上鎖、而且全樹掃描可能跑比較久,獨立處理,不佔用下面上傳/課程操作用的共用鎖
   if (body.action === 'reconcile') {
-    const r = reconcileIndex();
-    if (!r) return jsonResponse({ ok: false, error: 'server busy, please retry' });
-    return jsonResponse({ ok: true, added: r.added, removed: r.removed });
+    try {
+      const r = reconcileIndex();
+      if (!r) return jsonResponse({ ok: false, error: 'server busy, please retry' });
+      return jsonResponse({ ok: true, added: r.added, removed: r.removed });
+    } catch (err) {
+      return jsonResponse({ ok: false, error: String(err) });
+    }
   }
 
   const lock = LockService.getScriptLock();
