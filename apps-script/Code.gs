@@ -671,7 +671,9 @@ function reconcileIndex() {
       const courseFolder = courseIt.next();
       if (courseFolder.getId() === inboxId) continue;
       if (courseFolder.isTrashed()) continue;
-      const courseName = courseFolder.getName();
+      // 用課程清單裡登記的大小寫版本(如果有的話),避免資料夾被手動改過大小寫時,
+      // 補登進索引表的標籤跟課程清單顯示的名稱不一致。
+      const courseName = normalizeTag(courseFolder.getName(), props);
       let courseHasFiles = false;
 
       const files = collectFilesRecursive(courseFolder);
