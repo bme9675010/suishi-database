@@ -111,11 +111,35 @@
     -webkit-tap-highlight-color: transparent;
   }
   .note-tool-btn:disabled { opacity: .5; }
-  .note-textarea {
-    width: 100%; min-height: 120px; padding: 10px; border-radius: 10px;
-    border: 1px solid var(--border); background: #0f172a; color: var(--text);
-    font-size: 14px; font-family: inherit; resize: vertical;
+  .note-tool-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+
+  .chapter-nav {
+    display: flex; gap: 6px; margin-bottom: 8px; overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
+  .chapter-nav:empty { display: none; }
+  .chapter-chip {
+    flex-shrink: 0; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border);
+    background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+
+  .note-editor {
+    width: 100%; min-height: 120px; max-height: 50vh; overflow-y: auto;
+    padding: 10px; border-radius: 10px;
+    border: 1px solid var(--border); background: #0f172a; color: var(--text);
+    font-size: 14px; font-family: inherit; line-height: 1.6;
+  }
+  .note-editor:empty::before {
+    content: attr(data-placeholder); color: var(--muted); pointer-events: none;
+  }
+  .note-editor mark {
+    background: #fde047; color: #1c1917; border-radius: 2px; padding: 0 2px;
+  }
+  .note-editor h2.chapter-marker {
+    font-size: 14px; color: var(--accent); border-top: 1px solid var(--border);
+    margin: 14px 0 6px; padding-top: 10px;
+  }
+  .note-editor h2.chapter-marker:first-child { border-top: none; margin-top: 0; padding-top: 0; }
   .save-note-btn {
     width: 100%; padding: 12px; border-radius: 10px; border: none;
     background: var(--accent); color: var(--accent-text);
@@ -255,12 +279,13 @@
   <div class="course-label" id="noteCourseLabel">目前課程:—</div>
   <div class="note-toolbar">
     <button type="button" class="note-tool-btn" id="insertTimeBtn" disabled>⏱ 時間</button>
-    <button type="button" class="note-tool-btn" id="highlightBtn" disabled>★ 重點</button>
+    <button type="button" class="note-tool-btn" id="highlightBtn" disabled>🖍 螢光筆</button>
     <button type="button" class="note-tool-btn" id="chapterBtn" disabled>§ 章節</button>
   </div>
-  <textarea class="note-textarea" id="noteTextarea" placeholder="打字記筆記,存檔會自動歸到上面選的課程…" disabled></textarea>
+  <div class="chapter-nav" id="chapterNav"></div>
+  <div class="note-editor" id="noteEditor" contenteditable="true" data-placeholder="打字記筆記,存檔會自動歸到上面選的課程…"></div>
   <button class="save-note-btn" id="saveNoteBtn" disabled>儲存筆記</button>
-  <p class="hint-text">同一天、同一課程重複存檔會更新同一份筆記,不會變成好幾個檔案。「★ 重點」選取文字後點,會用【】框起來;沒選取就在游標處插入框框讓你填。「§ 章節」會插入分隔線+你打的標題,方便之後回頭找段落。</p>
+  <p class="hint-text">同一天、同一課程重複存檔會更新同一份筆記,不會變成好幾個檔案。選取文字點「🖍 螢光筆」上色標記重點。「§ 章節」插入章節標題,上方會出現可以點擊跳轉的導覽列。</p>
 </div>
 
 <div class="card">
@@ -358,7 +383,8 @@
   var browseCourseDialog = document.getElementById('browseCourseDialog');
   var browseCourseTitleEl = document.getElementById('browseCourseTitle');
   var browseCourseListEl = document.getElementById('browseCourseList');
-  var noteTextarea = document.getElementById('noteTextarea');
+  var noteEditor = document.getElementById('noteEditor');
+  var chapterNavEl = document.getElementById('chapterNav');
   var saveNoteBtn = document.getElementById('saveNoteBtn');
   var noteCourseLabelEl = document.getElementById('noteCourseLabel');
   var insertTimeBtn = document.getElementById('insertTimeBtn');
@@ -850,7 +876,7 @@
 
   function updateShootEnabled() {
     shootBtn.disabled = !isConfigured();
-    noteTextarea.disabled = !isConfigured();
+    noteEditor.contentEditable = isConfigured() ? 'true' : 'false';
     saveNoteBtn.disabled = !isConfigured();
     uploadAudioBtn.disabled = !isConfigured();
     insertTimeBtn.disabled = !isConfigured();
@@ -1065,7 +1091,11 @@
   // 草稿以「日期 + 課程」為單位各自獨立存在 localStorage,切課程會換成那個課程今天的草稿內容
   // (不會弄丟,只是暫時看不到,切回去還在)。打字期間持續自動存草稿,避免分頁被系統關掉弄丟。
   // 存檔用 saveNote 這個 action:同一天、同一課程存檔是「更新」不是「新增」,不會愈存愈多檔案,
-  // 所以存檔後刻意不清空文字框——這份筆記代表「今天這堂課」,可以繼續打、隨時再存一次。
+  // 所以存檔後刻意不清空編輯器——這份筆記代表「今天這堂課」,可以繼續打、隨時再存一次。
+  //
+  // 編輯器是 contenteditable(不是 textarea),存的是 innerHTML,才能保留 <mark> 螢光筆
+  // 標記跟 <h2> 章節標題的格式。沒有引入任何外部富文字編輯器函式庫——這個專案一路以來是
+  // 單一自足的 HTML 檔案、沒有 CDN/build step,手刻最小夠用的 Range API 操作就好。
   function todayStamp() {
     var d = new Date();
     return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
@@ -1074,46 +1104,121 @@
     return 'noteDraft::' + todayStamp() + '::' + course;
   }
   function loadNoteDraft() {
-    noteTextarea.value = activeCourse ? (localStorage.getItem(noteDraftKey(activeCourse)) || '') : '';
+    noteEditor.innerHTML = activeCourse ? (localStorage.getItem(noteDraftKey(activeCourse)) || '') : '';
+    renderChapterNav();
   }
-  noteTextarea.addEventListener('input', function () {
+  noteEditor.addEventListener('input', function () {
+    renderChapterNav();
     if (!activeCourse) return;
-    localStorage.setItem(noteDraftKey(activeCourse), noteTextarea.value);
+    localStorage.setItem(noteDraftKey(activeCourse), noteEditor.innerHTML);
   });
 
-  // 在游標處插入文字(或用 before/after 包住目前選取的文字),插入後保持焦點在文字框、
-  // 觸發一次 input 事件讓草稿跟著存,三顆工具按鈕共用。
-  function insertIntoNote(before, after) {
-    after = after || '';
-    var start = noteTextarea.selectionStart;
-    var end = noteTextarea.selectionEnd;
-    var value = noteTextarea.value;
-    var selected = value.substring(start, end);
-    noteTextarea.value = value.substring(0, start) + before + selected + after + value.substring(end);
-    var cursorPos = start + before.length + selected.length + (selected ? after.length : 0);
-    noteTextarea.focus();
-    noteTextarea.selectionStart = noteTextarea.selectionEnd = cursorPos;
-    noteTextarea.dispatchEvent(new Event('input'));
+  // 取得目前編輯器裡的選取範圍;如果目前沒有選取在編輯器裡(例如剛載入頁面、還沒點進去打字),
+  // 就把游標移到編輯器內容最後面,讓工具按鈕在任何時候點都有明確、可預期的插入位置。
+  function getEditorRange() {
+    var sel = window.getSelection();
+    if (sel.rangeCount > 0) {
+      var range = sel.getRangeAt(0);
+      if (noteEditor.contains(range.commonAncestorContainer)) return range;
+    }
+    noteEditor.focus();
+    var range = document.createRange();
+    range.selectNodeContents(noteEditor);
+    range.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return range;
+  }
+
+  function applyRange(range) {
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    noteEditor.focus();
+    noteEditor.dispatchEvent(new Event('input'));
+  }
+
+  // 在游標處插入純文字節點(取代選取範圍,如果有的話),⏱ 時間按鈕用這個。
+  function insertTextAtCursor(text) {
+    var range = getEditorRange();
+    range.deleteContents();
+    var node = document.createTextNode(text);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.setEndAfter(node);
+    applyRange(range);
+  }
+
+  // 把目前選取的文字包進 <mark> 標籤(真的上色螢光筆效果)。沒有選取文字時,插入一個
+  // 內含零寬字元的空白 <mark>,讓游標能停在裡面繼續打字,打的字自然就是螢光筆效果。
+  function wrapSelectionWithMark() {
+    var range = getEditorRange();
+    var mark = document.createElement('mark');
+    if (range.collapsed) {
+      mark.appendChild(document.createTextNode('​'));
+      range.insertNode(mark);
+      range.setStart(mark.firstChild, 1);
+      range.setEnd(mark.firstChild, 1);
+    } else {
+      mark.appendChild(range.extractContents());
+      range.insertNode(mark);
+      range.setStartAfter(mark);
+      range.setEndAfter(mark);
+    }
+    applyRange(range);
+  }
+
+  // 插入一個章節標題(<h2>),插入點是目前游標位置(如果剛好選取了文字,標題插在選取範圍
+  // 開頭之前,不會吃掉選取的文字)。插入後重繪章節導覽列。
+  function insertChapter(title) {
+    var range = getEditorRange();
+    range.collapse(true);
+    var h2 = document.createElement('h2');
+    h2.className = 'chapter-marker';
+    h2.textContent = title;
+    range.insertNode(h2);
+    var br = document.createElement('br');
+    h2.after(br);
+    range.setStartAfter(br);
+    range.setEndAfter(br);
+    applyRange(range);
+  }
+
+  // 掃描編輯器裡所有章節標題,重繪上方的導覽列(小 chip,點了捲動到該章節)。
+  function renderChapterNav() {
+    var headings = noteEditor.querySelectorAll('h2.chapter-marker');
+    chapterNavEl.innerHTML = '';
+    headings.forEach(function (h, i) {
+      h.id = 'chapter-' + i;
+      var chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chapter-chip';
+      chip.textContent = h.textContent || '章節';
+      chip.addEventListener('click', function () {
+        h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      chapterNavEl.appendChild(chip);
+    });
   }
 
   insertTimeBtn.addEventListener('click', function () {
     var stamp = '[' + new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) + '] ';
-    insertIntoNote(stamp);
+    insertTextAtCursor(stamp);
   });
 
   highlightBtn.addEventListener('click', function () {
-    insertIntoNote('【', '】');
+    wrapSelectionWithMark();
   });
 
   chapterBtn.addEventListener('click', function () {
     var title = prompt('章節標題:');
     if (title === null) return; // 取消
-    insertIntoNote('\n\n── ' + (title.trim() || '章節') + ' ──\n\n');
+    insertChapter(title.trim() || '章節');
   });
 
   saveNoteBtn.addEventListener('click', function () {
-    var text = noteTextarea.value;
-    if (!text.trim()) { toast('筆記是空的'); return; }
+    var text = noteEditor.innerHTML;
+    if (!noteEditor.textContent.trim()) { toast('筆記是空的'); return; }
     if (!activeCourse) { toast('請先選課程'); return; }
 
     var now = new Date();

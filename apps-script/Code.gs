@@ -585,6 +585,10 @@ function getOrCreateFolder(parent, name) {
  * (適合拍照/錄音這種一次性紀錄),saveNote 則是「同一天、同一課程共用同一個檔案」——
  * 檔名用日期(不含時分秒)決定,同一天內重複呼叫會覆蓋更新同一個檔案內容,不會累積出
  * 一堂課存好幾次、變成好幾個零碎檔案的狀況。
+ *
+ * 存成 .html(不是純文字):PWA 端的筆記編輯器是 contenteditable,text 傳進來的是它的
+ * innerHTML(可能包含 <mark> 螢光筆標記、<h2> 章節標題),用 HTML mimetype 存檔案打開時
+ * 才會正確顯示格式,不是看到一堆標籤符號。
  */
 function saveNote(courseTag, text, props) {
   const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
@@ -601,7 +605,7 @@ function saveNote(courseTag, text, props) {
   const monthFolder = getOrCreateFolder(yearFolder, mm);
   const noteFolder = getOrCreateFolder(monthFolder, TYPE_FOLDER_NAME.note);
 
-  const fileName = TYPE_FOLDER_NAME.note + '_' + yyyy + mm + dd + '_' + safeTag + '.txt';
+  const fileName = TYPE_FOLDER_NAME.note + '_' + yyyy + mm + dd + '_' + safeTag + '.html';
   const existing = noteFolder.getFilesByName(fileName);
   const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
 
@@ -611,7 +615,7 @@ function saveNote(courseTag, text, props) {
     file.setContent(text);
     updateIndexRowTime(sheet, file.getUrl(), now); // 讓瀏覽清單排序反映「最後編輯時間」而不是第一次建立時間
   } else {
-    file = noteFolder.createFile(fileName, text, MimeType.PLAIN_TEXT);
+    file = noteFolder.createFile(fileName, text, MimeType.HTML);
     sheet.appendRow([now, TYPE_FOLDER_NAME.note, safeTag, fileName, file.getUrl(), 'PWA', '']);
   }
 
