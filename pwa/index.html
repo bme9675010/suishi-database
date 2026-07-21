@@ -104,6 +104,13 @@
 
   .course-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
   .hint-text { font-size: 11px; color: var(--muted); margin: 8px 0 0; line-height: 1.5; }
+  .note-toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
+  .note-tool-btn {
+    flex: 1; padding: 7px 6px; border-radius: 8px; border: 1px solid var(--border);
+    background: transparent; color: var(--text); font-size: 12px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .note-tool-btn:disabled { opacity: .5; }
   .note-textarea {
     width: 100%; min-height: 120px; padding: 10px; border-radius: 10px;
     border: 1px solid var(--border); background: #0f172a; color: var(--text);
@@ -246,8 +253,14 @@
 <div class="card">
   <h2>課堂筆記</h2>
   <div class="course-label" id="noteCourseLabel">目前課程:—</div>
+  <div class="note-toolbar">
+    <button type="button" class="note-tool-btn" id="insertTimeBtn" disabled>⏱ 時間</button>
+    <button type="button" class="note-tool-btn" id="highlightBtn" disabled>★ 重點</button>
+    <button type="button" class="note-tool-btn" id="chapterBtn" disabled>§ 章節</button>
+  </div>
   <textarea class="note-textarea" id="noteTextarea" placeholder="打字記筆記,存檔會自動歸到上面選的課程…" disabled></textarea>
   <button class="save-note-btn" id="saveNoteBtn" disabled>儲存筆記</button>
+  <p class="hint-text">同一天、同一課程重複存檔會更新同一份筆記,不會變成好幾個檔案。「★ 重點」選取文字後點,會用【】框起來;沒選取就在游標處插入框框讓你填。「§ 章節」會插入分隔線+你打的標題,方便之後回頭找段落。</p>
 </div>
 
 <div class="card">
@@ -348,6 +361,9 @@
   var noteTextarea = document.getElementById('noteTextarea');
   var saveNoteBtn = document.getElementById('saveNoteBtn');
   var noteCourseLabelEl = document.getElementById('noteCourseLabel');
+  var insertTimeBtn = document.getElementById('insertTimeBtn');
+  var highlightBtn = document.getElementById('highlightBtn');
+  var chapterBtn = document.getElementById('chapterBtn');
   var uploadAudioBtn = document.getElementById('uploadAudioBtn');
   var audioFileInput = document.getElementById('audioFileInput');
   var audioCourseLabelEl = document.getElementById('audioCourseLabel');
@@ -735,11 +751,13 @@
   }
 
   // 課堂筆記、上傳錄音檔這些跟主要課程選單有點距離的卡片,各自顯示一份「目前課程」提醒,
-  // 避免忘記切課程結果存錯標籤。activeCourse 一變動就統一從這裡更新所有份。
+  // 避免忘記切課程結果存錯標籤。activeCourse 一變動就統一從這裡更新所有份,
+  // 順便把筆記框內容換成「這個課程今天」的草稿(每個課程、每一天都是各自獨立的草稿)。
   function renderCourseLabels() {
     var text = '目前課程:' + (activeCourse || '—');
     noteCourseLabelEl.textContent = text;
     audioCourseLabelEl.textContent = text;
+    loadNoteDraft();
   }
 
   function makeChip(c) {
@@ -835,6 +853,9 @@
     noteTextarea.disabled = !isConfigured();
     saveNoteBtn.disabled = !isConfigured();
     uploadAudioBtn.disabled = !isConfigured();
+    insertTimeBtn.disabled = !isConfigured();
+    highlightBtn.disabled = !isConfigured();
+    chapterBtn.disabled = !isConfigured();
   }
 
   // ---------- IndexedDB 佇列 ----------
@@ -880,18 +901,22 @@
 
   // ---------- 上傳 ----------
   function uploadItem(item) {
+    // 筆記走 saveNote(純文字,直接放 JSON,不用 base64);拍照/錄音走原本的 base64 上傳。
     // 用 text/plain 避免瀏覽器對 GAS 發出 CORS 預檢請求 (GAS 不支援 OPTIONS)
+    var body = item.kind === 'note'
+      ? { passKey: settings.passKey, action: 'saveNote', courseName: item.tag, text: item.text }
+      : {
+          passKey: settings.passKey,
+          filename: item.filename,
+          mimeType: item.mimeType,
+          base64Data: item.base64Data,
+          tag: item.tag,
+          type: item.type || 'photo'
+        };
     return fetch(settings.gasUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        passKey: settings.passKey,
-        filename: item.filename,
-        mimeType: item.mimeType,
-        base64Data: item.base64Data,
-        tag: item.tag,
-        type: item.type || 'photo'
-      })
+      body: JSON.stringify(body)
     }).then(function (r) { return r.json(); });
   }
 
@@ -1037,11 +1062,53 @@
   });
 
   // ---------- 課堂筆記 ----------
-  // 打字期間自動存草稿到 localStorage,避免瀏覽器分頁被系統關掉、或不小心切換頁面弄丟還沒存檔的筆記。
-  var NOTE_DRAFT_KEY = 'noteDraft';
-  noteTextarea.value = localStorage.getItem(NOTE_DRAFT_KEY) || '';
+  // 草稿以「日期 + 課程」為單位各自獨立存在 localStorage,切課程會換成那個課程今天的草稿內容
+  // (不會弄丟,只是暫時看不到,切回去還在)。打字期間持續自動存草稿,避免分頁被系統關掉弄丟。
+  // 存檔用 saveNote 這個 action:同一天、同一課程存檔是「更新」不是「新增」,不會愈存愈多檔案,
+  // 所以存檔後刻意不清空文字框——這份筆記代表「今天這堂課」,可以繼續打、隨時再存一次。
+  function todayStamp() {
+    var d = new Date();
+    return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+  }
+  function noteDraftKey(course) {
+    return 'noteDraft::' + todayStamp() + '::' + course;
+  }
+  function loadNoteDraft() {
+    noteTextarea.value = activeCourse ? (localStorage.getItem(noteDraftKey(activeCourse)) || '') : '';
+  }
   noteTextarea.addEventListener('input', function () {
-    localStorage.setItem(NOTE_DRAFT_KEY, noteTextarea.value);
+    if (!activeCourse) return;
+    localStorage.setItem(noteDraftKey(activeCourse), noteTextarea.value);
+  });
+
+  // 在游標處插入文字(或用 before/after 包住目前選取的文字),插入後保持焦點在文字框、
+  // 觸發一次 input 事件讓草稿跟著存,三顆工具按鈕共用。
+  function insertIntoNote(before, after) {
+    after = after || '';
+    var start = noteTextarea.selectionStart;
+    var end = noteTextarea.selectionEnd;
+    var value = noteTextarea.value;
+    var selected = value.substring(start, end);
+    noteTextarea.value = value.substring(0, start) + before + selected + after + value.substring(end);
+    var cursorPos = start + before.length + selected.length + (selected ? after.length : 0);
+    noteTextarea.focus();
+    noteTextarea.selectionStart = noteTextarea.selectionEnd = cursorPos;
+    noteTextarea.dispatchEvent(new Event('input'));
+  }
+
+  insertTimeBtn.addEventListener('click', function () {
+    var stamp = '[' + new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) + '] ';
+    insertIntoNote(stamp);
+  });
+
+  highlightBtn.addEventListener('click', function () {
+    insertIntoNote('【', '】');
+  });
+
+  chapterBtn.addEventListener('click', function () {
+    var title = prompt('章節標題:');
+    if (title === null) return; // 取消
+    insertIntoNote('\n\n── ' + (title.trim() || '章節') + ' ──\n\n');
   });
 
   saveNoteBtn.addEventListener('click', function () {
@@ -1049,30 +1116,15 @@
     if (!text.trim()) { toast('筆記是空的'); return; }
     if (!activeCourse) { toast('請先選課程'); return; }
 
-    var blob = new Blob([text], { type: 'text/plain' });
-    var reader = new FileReader();
-    reader.onload = function () {
-      var base64Data = reader.result.split(',')[1];
-      var now = new Date();
-      var stamp = now.toLocaleString('zh-TW', { hour12: false });
-      var item = {
-        filename: 'note_' + now.getTime() + '.txt',
-        mimeType: 'text/plain',
-        base64Data: base64Data,
-        tag: activeCourse,
-        time: stamp,
-        type: 'note'
-      };
-      queueAdd(item).then(function () {
-        noteTextarea.value = '';
-        localStorage.removeItem(NOTE_DRAFT_KEY);
-        pushLog({ tag: item.tag, time: item.time, state: 'pending', type: item.type });
-        refreshQueueInfo();
-        processQueue();
-        toast('筆記已存,排隊上傳中');
-      });
-    };
-    reader.readAsDataURL(blob);
+    var now = new Date();
+    var stamp = now.toLocaleString('zh-TW', { hour12: false });
+    var item = { kind: 'note', tag: activeCourse, text: text, time: stamp, type: 'note' };
+    queueAdd(item).then(function () {
+      pushLog({ tag: item.tag, time: item.time, state: 'pending', type: item.type });
+      refreshQueueInfo();
+      processQueue();
+      toast('筆記已存,排隊上傳中');
+    });
   });
 
   // ---------- 連線狀態 ----------

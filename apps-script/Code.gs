@@ -294,11 +294,15 @@ function getFilesForCourse(courseName, props) {
  *   action: 'addCourse'     → PWA 新增課程用。Body: { passKey, action, courseName }
  *   action: 'removeCourse'  → PWA 刪除課程用。Body: { passKey, action, courseName }
  *   action: 'dismissCleanup'→ PWA 確認已手動清理 Drive 用。Body: { passKey, action, courseName }
- *   (無 action)             → PWA 拍照/筆記/錄音檔上傳用。Body: { passKey, filename, mimeType, base64Data, tag, type }
- *                              type 是 'photo'(預設,拍照)、'note'(課堂筆記,存成 .txt)或 'audio'
- *                              (其他裝置錄的音檔)。注意:base64 編碼後的請求本體有大小上限
- *                              (~50MB),適合短音檔;整堂課等級的大檔案(60~150MB)還是要走
- *                              「分享到 Drive → 存進 _收件夾」那條路,見 ios-shortcut-guide.md。
+ *   action: 'saveNote'      → PWA 課堂筆記存檔用。Body: { passKey, action, courseName, text }
+ *                              同一天、同一課程共用同一個檔案,重複呼叫是覆蓋更新,不會累積出
+ *                              一堆零碎檔案(見 saveNote())。文字內容直接放 JSON 字串,不用 base64。
+ *   (無 action)             → PWA 拍照/錄音檔上傳用。Body: { passKey, filename, mimeType, base64Data, tag, type }
+ *                              type 是 'photo'(預設,拍照)或 'audio'(其他裝置錄的音檔;也相容
+ *                              舊版課堂筆記用過的 'note',只是新版筆記都改走 saveNote 這個 action 了)。
+ *                              注意:base64 編碼後的請求本體有大小上限(~50MB),適合短音檔;
+ *                              整堂課等級的大檔案(60~150MB)還是要走「分享到 Drive → 存進 _收件夾」
+ *                              那條路,見 ios-shortcut-guide.md。
  */
 function doPost(e) {
   const props = PropertiesService.getScriptProperties();
@@ -341,6 +345,9 @@ function doPost(e) {
     }
     if (body.action === 'dismissCleanup') {
       return handleDismissCleanup(body, props);
+    }
+    if (body.action === 'saveNote') {
+      return handleSaveNote(body, props);
     }
 
     if (!body.base64Data || !body.filename) {
@@ -407,6 +414,19 @@ function handleDismissCleanup(body, props) {
   const name = String(body.courseName || '').trim();
   const pending = clearPendingCleanup(name, props);
   return jsonResponse({ ok: true, pending: pending });
+}
+
+function handleSaveNote(body, props) {
+  const text = String(body.text || '');
+  if (!text.trim()) {
+    return jsonResponse({ ok: false, error: 'empty note' });
+  }
+  const tag = String(body.courseName || '').trim();
+  if (!tag) {
+    return jsonResponse({ ok: false, error: 'missing courseName' });
+  }
+  const result = saveNote(tag, text, props);
+  return jsonResponse({ ok: true, url: result.url, name: result.name });
 }
 
 /**
@@ -558,6 +578,59 @@ function getOrCreateFolder(parent, name) {
   const it = parent.getFoldersByName(name);
   if (it.hasNext()) return it.next();
   return parent.createFolder(name);
+}
+
+/**
+ * 課堂筆記專用的儲存邏輯,跟 fileIntoLibrary 不同:fileIntoLibrary 每次呼叫都建一個新檔案
+ * (適合拍照/錄音這種一次性紀錄),saveNote 則是「同一天、同一課程共用同一個檔案」——
+ * 檔名用日期(不含時分秒)決定,同一天內重複呼叫會覆蓋更新同一個檔案內容,不會累積出
+ * 一堂課存好幾次、變成好幾個零碎檔案的狀況。
+ */
+function saveNote(courseTag, text, props) {
+  const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
+  const now = new Date();
+
+  const yyyy = Utilities.formatDate(now, 'Asia/Taipei', 'yyyy');
+  const mm = Utilities.formatDate(now, 'Asia/Taipei', 'MM');
+  const dd = Utilities.formatDate(now, 'Asia/Taipei', 'dd');
+  const safeTag = String(courseTag || '未分類').replace(/[\\\/:*?"<>|]/g, '') || '未分類';
+  registerCourseIfNew(safeTag, props);
+
+  const courseFolder = getOrCreateFolder(root, safeTag);
+  const yearFolder = getOrCreateFolder(courseFolder, yyyy);
+  const monthFolder = getOrCreateFolder(yearFolder, mm);
+  const noteFolder = getOrCreateFolder(monthFolder, TYPE_FOLDER_NAME.note);
+
+  const fileName = TYPE_FOLDER_NAME.note + '_' + yyyy + mm + dd + '_' + safeTag + '.txt';
+  const existing = noteFolder.getFilesByName(fileName);
+  const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+
+  let file;
+  if (existing.hasNext()) {
+    file = existing.next();
+    file.setContent(text);
+    updateIndexRowTime(sheet, file.getUrl(), now); // 讓瀏覽清單排序反映「最後編輯時間」而不是第一次建立時間
+  } else {
+    file = noteFolder.createFile(fileName, text, MimeType.PLAIN_TEXT);
+    sheet.appendRow([now, TYPE_FOLDER_NAME.note, safeTag, fileName, file.getUrl(), 'PWA', '']);
+  }
+
+  return { url: file.getUrl(), name: fileName };
+}
+
+/**
+ * 在索引表裡找出 Drive連結 欄等於 url 的那一列,把時間欄(A欄)更新成 now。找不到就不動作。
+ */
+function updateIndexRowTime(sheet, url, now) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const urls = sheet.getRange(2, 5, lastRow - 1, 1).getValues();
+  for (let i = 0; i < urls.length; i++) {
+    if (urls[i][0] === url) {
+      sheet.getRange(i + 2, 1).setValue(now);
+      return;
+    }
+  }
 }
 
 // ============ 一次性搬移工具(舊結構 年/月/類型 → 新結構 課程/年/月/類型) ============
