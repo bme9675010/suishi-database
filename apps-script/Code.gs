@@ -294,8 +294,11 @@ function getFilesForCourse(courseName, props) {
  *   action: 'addCourse'     → PWA 新增課程用。Body: { passKey, action, courseName }
  *   action: 'removeCourse'  → PWA 刪除課程用。Body: { passKey, action, courseName }
  *   action: 'dismissCleanup'→ PWA 確認已手動清理 Drive 用。Body: { passKey, action, courseName }
- *   (無 action)             → PWA 拍照/筆記上傳用。Body: { passKey, filename, mimeType, base64Data, tag, type }
- *                              type 是 'photo'(預設,拍照)或 'note'(課堂筆記,存成 .txt)
+ *   (無 action)             → PWA 拍照/筆記/錄音檔上傳用。Body: { passKey, filename, mimeType, base64Data, tag, type }
+ *                              type 是 'photo'(預設,拍照)、'note'(課堂筆記,存成 .txt)或 'audio'
+ *                              (其他裝置錄的音檔)。注意:base64 編碼後的請求本體有大小上限
+ *                              (~50MB),適合短音檔;整堂課等級的大檔案(60~150MB)還是要走
+ *                              「分享到 Drive → 存進 _收件夾」那條路,見 ios-shortcut-guide.md。
  */
 function doPost(e) {
   const props = PropertiesService.getScriptProperties();
@@ -346,7 +349,8 @@ function doPost(e) {
 
     const bytes = Utilities.base64Decode(body.base64Data);
     const blob = Utilities.newBlob(bytes, body.mimeType || 'application/octet-stream', body.filename);
-    const uploadType = body.type === 'note' ? 'note' : 'photo'; // 目前 PWA 只會傳這兩種,其他值一律當拍照處理
+    // type 只接受這三種已知值,其他一律當拍照處理(避免呼叫端傳奇怪字串建出非預期的資料夾)
+    const uploadType = (body.type === 'note' || body.type === 'audio') ? body.type : 'photo';
 
     const result = fileIntoLibrary(blob, uploadType, body.tag || '未分類', 'PWA');
     return jsonResponse({ ok: true, url: result.url, name: result.name });

@@ -102,7 +102,8 @@
   }
   .status-row.warn { color: #fbbf24; }
 
-  .note-course-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .course-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .hint-text { font-size: 11px; color: var(--muted); margin: 8px 0 0; line-height: 1.5; }
   .note-textarea {
     width: 100%; min-height: 120px; padding: 10px; border-radius: 10px;
     border: 1px solid var(--border); background: #0f172a; color: var(--text);
@@ -233,8 +234,18 @@
 </div>
 
 <div class="card">
+  <h2>上傳錄音檔</h2>
+  <div class="course-label" id="audioCourseLabel">目前課程:—</div>
+  <button class="camera-btn" id="uploadAudioBtn" disabled>
+    <span class="icon">🎙️</span><span>選擇錄音檔上傳</span>
+  </button>
+  <input type="file" accept="audio/*" id="audioFileInput" hidden>
+  <p class="hint-text">適合用其他裝置(另一支手機、錄音筆…)錄的短音檔。整堂課等級的大檔案(60~150MB)請改用「分享到 Google Drive App → 存進 _收件夾」,不限檔案大小,系統一樣會自動歸檔。</p>
+</div>
+
+<div class="card">
   <h2>課堂筆記</h2>
-  <div class="note-course-label" id="noteCourseLabel">目前課程:—</div>
+  <div class="course-label" id="noteCourseLabel">目前課程:—</div>
   <textarea class="note-textarea" id="noteTextarea" placeholder="打字記筆記,存檔會自動歸到上面選的課程…" disabled></textarea>
   <button class="save-note-btn" id="saveNoteBtn" disabled>儲存筆記</button>
 </div>
@@ -337,6 +348,9 @@
   var noteTextarea = document.getElementById('noteTextarea');
   var saveNoteBtn = document.getElementById('saveNoteBtn');
   var noteCourseLabelEl = document.getElementById('noteCourseLabel');
+  var uploadAudioBtn = document.getElementById('uploadAudioBtn');
+  var audioFileInput = document.getElementById('audioFileInput');
+  var audioCourseLabelEl = document.getElementById('audioCourseLabel');
 
   var activeCourse = localStorage.getItem('activeCourse') || '';
   var recentLog = [];
@@ -717,11 +731,15 @@
     touchRecency(c);
     renderCourseGrid();
     renderRecent();
-    renderNoteCourseLabel();
+    renderCourseLabels();
   }
 
-  function renderNoteCourseLabel() {
-    noteCourseLabelEl.textContent = '目前課程:' + (activeCourse || '—');
+  // 課堂筆記、上傳錄音檔這些跟主要課程選單有點距離的卡片,各自顯示一份「目前課程」提醒,
+  // 避免忘記切課程結果存錯標籤。activeCourse 一變動就統一從這裡更新所有份。
+  function renderCourseLabels() {
+    var text = '目前課程:' + (activeCourse || '—');
+    noteCourseLabelEl.textContent = text;
+    audioCourseLabelEl.textContent = text;
   }
 
   function makeChip(c) {
@@ -779,7 +797,7 @@
     }
     renderRecent();
     renderCourseGrid();
-    renderNoteCourseLabel();
+    renderCourseLabels();
   }
 
   courseSearchInput.addEventListener('input', renderCourseGrid);
@@ -816,6 +834,7 @@
     shootBtn.disabled = !isConfigured();
     noteTextarea.disabled = !isConfigured();
     saveNoteBtn.disabled = !isConfigured();
+    uploadAudioBtn.disabled = !isConfigured();
   }
 
   // ---------- IndexedDB 佇列 ----------
@@ -892,7 +911,7 @@
       var li = document.createElement('li');
       var name = document.createElement('span');
       name.className = 'name';
-      name.textContent = (e.type === 'note' ? '📝 ' : '📷 ') + e.tag + ' · ' + e.time;
+      name.textContent = (e.type === 'note' ? '📝 ' : (e.type === 'audio' ? '🎙️ ' : '📷 ')) + e.tag + ' · ' + e.time;
       var state = document.createElement('span');
       state.className = 'state ' + e.state;
       state.textContent = e.state === 'ok' ? '已上傳' : e.state === 'pending' ? '排隊中' : '失敗,等重試';
@@ -970,6 +989,53 @@
     reader.readAsDataURL(file);
   });
 
+  // ---------- 上傳錄音檔(其他裝置錄的)----------
+  // 走跟拍照一樣的直接上傳路徑,base64 編碼後有請求大小上限,只適合短音檔;
+  // 整堂課等級的大檔案引導去用「分享到 Drive → 存進 _收件夾」那條路(不限大小)。
+  var AUDIO_SIZE_WARN = 20 * 1024 * 1024; // 20MB,超過這個大小容易上傳失敗或很久
+
+  uploadAudioBtn.addEventListener('click', function () {
+    if (!activeCourse) { toast('請先選課程'); return; }
+    audioFileInput.click();
+  });
+
+  audioFileInput.addEventListener('change', function () {
+    var file = audioFileInput.files[0];
+    audioFileInput.value = '';
+    if (!file) return;
+
+    if (file.size > AUDIO_SIZE_WARN) {
+      var mb = (file.size / 1024 / 1024).toFixed(0);
+      var proceed = confirm(
+        '這個檔案有 ' + mb + 'MB,透過這個按鈕上傳容易失敗或很久。\n\n' +
+        '建議改用「分享到 Google Drive App → 存進 _收件夾」的方式(不限檔案大小,系統一樣會自動歸檔)。\n\n' +
+        '仍要試試看直接上傳嗎?'
+      );
+      if (!proceed) return;
+    }
+
+    var reader = new FileReader();
+    reader.onload = function () {
+      var base64Data = reader.result.split(',')[1];
+      var now = new Date();
+      var stamp = now.toLocaleString('zh-TW', { hour12: false });
+      var item = {
+        filename: file.name || ('audio_' + now.getTime()),
+        mimeType: file.type || 'audio/mp4',
+        base64Data: base64Data,
+        tag: activeCourse,
+        time: stamp,
+        type: 'audio'
+      };
+      queueAdd(item).then(function () {
+        pushLog({ tag: item.tag, time: item.time, state: 'pending', type: item.type });
+        refreshQueueInfo();
+        processQueue();
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+
   // ---------- 課堂筆記 ----------
   // 打字期間自動存草稿到 localStorage,避免瀏覽器分頁被系統關掉、或不小心切換頁面弄丟還沒存檔的筆記。
   var NOTE_DRAFT_KEY = 'noteDraft';
@@ -1030,7 +1096,7 @@
   updateShootEnabled();
   updateNetInfo();
   refreshQueueInfo();
-  renderNoteCourseLabel();
+  renderCourseLabels();
   refreshCourses();
   refreshPendingCleanup();
   processQueue();
