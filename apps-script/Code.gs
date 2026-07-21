@@ -423,10 +423,12 @@ function handleDismissCleanup(body, props) {
  * blocks 格式(PWA 端的 extractNoteBlocks() 產生):
  *   [ { type:'heading', level: 1|2|3, text:'第一章' },   // level 1=大章、2=節、3=小節
  *     { type:'paragraph', runs:[
- *         { text:'一般文字', bold:false, italic:false, highlightColor:null },
- *         { text:'重點',    bold:true,  italic:false, highlightColor:'#fde047' }
+ *         { text:'一般文字', bold:false, italic:false, highlightColor:null,    textColor:null },
+ *         { text:'重點',    bold:true,  italic:false, highlightColor:'#fde047', textColor:null },
+ *         { text:'警告',    bold:false, italic:false, highlightColor:null,    textColor:'#dc2626' }
  *     ] },
  *     ... ]
+ *   highlightColor 是螢光筆底色,textColor 是字體本身的顏色,兩者互不影響、可以同時存在。
  */
 function handleSaveNote(body, props) {
   const blocks = Array.isArray(body.blocks) ? body.blocks : [];
@@ -677,6 +679,7 @@ function writeNoteBlocks(doc, blocks) {
         text.insertText(offset, runText);
         const end = offset + runText.length - 1;
         if (run.highlightColor) text.setBackgroundColor(offset, end, run.highlightColor);
+        if (run.textColor) text.setForegroundColor(offset, end, run.textColor);
         if (run.bold) text.setBold(offset, end, true);
         if (run.italic) text.setItalic(offset, end, true);
         offset += runText.length;

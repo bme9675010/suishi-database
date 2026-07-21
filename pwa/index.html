@@ -20,6 +20,7 @@
     --err: #f87171;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body {
     margin: 0; padding: 0; height: 100%;
     background: var(--bg); color: var(--text);
@@ -113,13 +114,13 @@
   .note-tool-btn:disabled { opacity: .5; }
   .note-tool-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 
-  .swatch-row { justify-content: flex-start; }
-  .highlight-swatch {
+  .swatch-row { justify-content: flex-start; padding: 4px 0 2px; }
+  .highlight-swatch, .text-color-swatch {
     flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%;
     border: 2px solid var(--border); cursor: pointer; padding: 0;
     -webkit-tap-highlight-color: transparent;
   }
-  .highlight-swatch:disabled { opacity: .5; }
+  .highlight-swatch:disabled, .text-color-swatch:disabled { opacity: .5; }
 
   .chapter-nav {
     display: flex; gap: 6px; margin-bottom: 8px; overflow-x: auto;
@@ -296,17 +297,27 @@
   <h2>課堂筆記</h2>
   <div class="course-label" id="noteCourseLabel">目前課程:—</div>
   <div class="note-toolbar">
-    <button type="button" class="note-tool-btn" id="insertTimeBtn" disabled>⏱ 時間</button>
-    <button type="button" class="note-tool-btn" id="boldBtn" disabled><b>B</b> 粗體</button>
-    <button type="button" class="note-tool-btn" id="italicBtn" disabled><i>I</i> 斜體</button>
+    <button type="button" class="note-tool-btn" id="insertTimeBtn" disabled title="插入目前時間">⏱</button>
+    <button type="button" class="note-tool-btn" id="boldBtn" disabled title="粗體"><b>B</b></button>
+    <button type="button" class="note-tool-btn" id="italicBtn" disabled title="斜體"><i>I</i></button>
+    <button type="button" class="note-tool-btn" id="toggleHighlightPanelBtn" disabled title="螢光筆">🖍</button>
+    <button type="button" class="note-tool-btn" id="toggleColorPanelBtn" disabled title="字體顏色">A</button>
+    <button type="button" class="note-tool-btn" id="toggleChapterPanelBtn" disabled title="插入章節">§</button>
   </div>
-  <div class="note-toolbar swatch-row">
-    <button type="button" class="highlight-swatch" data-color="#fde047" style="background:#fde047" disabled title="黃色重點"></button>
-    <button type="button" class="highlight-swatch" data-color="#86efac" style="background:#86efac" disabled title="綠色重點"></button>
-    <button type="button" class="highlight-swatch" data-color="#f9a8d4" style="background:#f9a8d4" disabled title="粉紅重點"></button>
-    <button type="button" class="highlight-swatch" data-color="#93c5fd" style="background:#93c5fd" disabled title="藍色重點"></button>
+  <div class="note-toolbar swatch-row" id="highlightPanel" hidden>
+    <button type="button" class="highlight-swatch" data-color="#fde047" style="background:#fde047" disabled title="黃色螢光筆"></button>
+    <button type="button" class="highlight-swatch" data-color="#86efac" style="background:#86efac" disabled title="綠色螢光筆"></button>
+    <button type="button" class="highlight-swatch" data-color="#f9a8d4" style="background:#f9a8d4" disabled title="粉紅螢光筆"></button>
+    <button type="button" class="highlight-swatch" data-color="#93c5fd" style="background:#93c5fd" disabled title="藍色螢光筆"></button>
   </div>
-  <div class="note-toolbar">
+  <div class="note-toolbar swatch-row" id="colorPanel" hidden>
+    <button type="button" class="text-color-swatch" data-color="#dc2626" style="background:#dc2626" disabled title="紅色字"></button>
+    <button type="button" class="text-color-swatch" data-color="#d97706" style="background:#d97706" disabled title="橘色字"></button>
+    <button type="button" class="text-color-swatch" data-color="#16a34a" style="background:#16a34a" disabled title="綠色字"></button>
+    <button type="button" class="text-color-swatch" data-color="#2563eb" style="background:#2563eb" disabled title="藍色字"></button>
+    <button type="button" class="text-color-swatch" data-color="#9333ea" style="background:#9333ea" disabled title="紫色字"></button>
+  </div>
+  <div class="note-toolbar" id="chapterPanel" hidden>
     <button type="button" class="note-tool-btn" id="chapter1Btn" disabled>大章</button>
     <button type="button" class="note-tool-btn" id="chapter2Btn" disabled>節</button>
     <button type="button" class="note-tool-btn" id="chapter3Btn" disabled>小節</button>
@@ -314,7 +325,7 @@
   <div class="chapter-nav" id="chapterNav"></div>
   <div class="note-editor" id="noteEditor" contenteditable="true" data-placeholder="打字記筆記,存檔會自動歸到上面選的課程…"></div>
   <button class="save-note-btn" id="saveNoteBtn" disabled>儲存筆記</button>
-  <p class="hint-text">同一天、同一課程重複存檔會更新同一份筆記,不會變成好幾個檔案。選取文字後點顏色圓點上色標記重點,點「粗體/斜體」加格式。「大章/節/小節」插入三種層級的章節標題,上方會出現可以點擊跳轉的導覽列。</p>
+  <p class="hint-text">同一天、同一課程重複存檔會更新同一份筆記,不會變成好幾個檔案。⏱/B/I 直接套用;🖍(螢光筆)、A(字體顏色)、§(章節)點了會展開顏色/層級選單,選完自動收起來。</p>
 </div>
 
 <div class="card">
@@ -419,7 +430,14 @@
   var insertTimeBtn = document.getElementById('insertTimeBtn');
   var boldBtn = document.getElementById('boldBtn');
   var italicBtn = document.getElementById('italicBtn');
+  var toggleHighlightPanelBtn = document.getElementById('toggleHighlightPanelBtn');
+  var toggleColorPanelBtn = document.getElementById('toggleColorPanelBtn');
+  var toggleChapterPanelBtn = document.getElementById('toggleChapterPanelBtn');
+  var highlightPanel = document.getElementById('highlightPanel');
+  var colorPanel = document.getElementById('colorPanel');
+  var chapterPanel = document.getElementById('chapterPanel');
   var highlightSwatches = document.querySelectorAll('.highlight-swatch');
+  var textColorSwatches = document.querySelectorAll('.text-color-swatch');
   var chapter1Btn = document.getElementById('chapter1Btn');
   var chapter2Btn = document.getElementById('chapter2Btn');
   var chapter3Btn = document.getElementById('chapter3Btn');
@@ -917,7 +935,11 @@
     insertTimeBtn.disabled = !isConfigured();
     boldBtn.disabled = !isConfigured();
     italicBtn.disabled = !isConfigured();
+    toggleHighlightPanelBtn.disabled = !isConfigured();
+    toggleColorPanelBtn.disabled = !isConfigured();
+    toggleChapterPanelBtn.disabled = !isConfigured();
     highlightSwatches.forEach(function (btn) { btn.disabled = !isConfigured(); });
+    textColorSwatches.forEach(function (btn) { btn.disabled = !isConfigured(); });
     chapter1Btn.disabled = !isConfigured();
     chapter2Btn.disabled = !isConfigured();
     chapter3Btn.disabled = !isConfigured();
@@ -1216,6 +1238,19 @@
     });
   }
 
+  // 字體顏色用 <span style="color:..."> 包起來(跟螢光筆的 <mark> 是背景色不同,這個是文字本身的顏色)。
+  // data-text-color 存原始 hex,理由跟螢光筆一樣:瀏覽器讀 style.color 回來會正規化成 rgb(),直接存
+  // 原始值比較保險。顏色特意選中飽和度較高的深色系(紅橘綠藍紫),因為筆記最後存進 Google 文件、
+  // 文件底色是白色,太淺的顏色(例如白色、淺黃)在白底上會看不清楚,所以沒有像螢光筆那樣給淺色選項。
+  function applyTextColor(color) {
+    wrapSelection(function () {
+      var span = document.createElement('span');
+      span.style.color = color;
+      span.dataset.textColor = color;
+      return span;
+    });
+  }
+
   // 插入一個章節標題(<h1>/<h2>/<h3>,對應大章/節/小節三種層級),插入點是目前游標位置
   // (如果剛好選取了文字,標題插在選取範圍開頭之前,不會吃掉選取的文字)。插入後重繪章節導覽列。
   function insertChapterAtLevel(level) {
@@ -1253,6 +1288,35 @@
     });
   }
 
+  // ---------- 工具列的展開/收合面板(螢光筆顏色、字體顏色、章節層級)----------
+  // 平常只顯示一排小按鈕,點了才展開對應的選項列,選完(或再點一次同一顆)自動收合,
+  // 同時間最多只開一個面板,避免版面一直往下長、變得雜亂。
+  var TOOL_PANELS = [
+    { panel: highlightPanel, btn: toggleHighlightPanelBtn },
+    { panel: colorPanel, btn: toggleColorPanelBtn },
+    { panel: chapterPanel, btn: toggleChapterPanelBtn }
+  ];
+
+  function closeAllToolPanels() {
+    TOOL_PANELS.forEach(function (p) {
+      p.panel.hidden = true;
+      p.btn.classList.remove('active');
+    });
+  }
+
+  function toggleToolPanel(entry) {
+    var wasOpen = !entry.panel.hidden;
+    closeAllToolPanels();
+    if (!wasOpen) {
+      entry.panel.hidden = false;
+      entry.btn.classList.add('active');
+    }
+  }
+
+  toggleHighlightPanelBtn.addEventListener('click', function () { toggleToolPanel(TOOL_PANELS[0]); });
+  toggleColorPanelBtn.addEventListener('click', function () { toggleToolPanel(TOOL_PANELS[1]); });
+  toggleChapterPanelBtn.addEventListener('click', function () { toggleToolPanel(TOOL_PANELS[2]); });
+
   insertTimeBtn.addEventListener('click', function () {
     var stamp = '[' + new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) + '] ';
     insertTextAtCursor(stamp);
@@ -1267,18 +1331,23 @@
   });
 
   highlightSwatches.forEach(function (btn) {
-    btn.addEventListener('click', function () { applyHighlight(btn.dataset.color); });
+    btn.addEventListener('click', function () { applyHighlight(btn.dataset.color); closeAllToolPanels(); });
   });
 
-  chapter1Btn.addEventListener('click', function () { insertChapterAtLevel(1); });
-  chapter2Btn.addEventListener('click', function () { insertChapterAtLevel(2); });
-  chapter3Btn.addEventListener('click', function () { insertChapterAtLevel(3); });
+  textColorSwatches.forEach(function (btn) {
+    btn.addEventListener('click', function () { applyTextColor(btn.dataset.color); closeAllToolPanels(); });
+  });
+
+  chapter1Btn.addEventListener('click', function () { closeAllToolPanels(); insertChapterAtLevel(1); });
+  chapter2Btn.addEventListener('click', function () { closeAllToolPanels(); insertChapterAtLevel(2); });
+  chapter3Btn.addEventListener('click', function () { closeAllToolPanels(); insertChapterAtLevel(3); });
 
   // 把編輯器的 DOM 結構轉成後端看得懂的結構化段落陣列(存成原生 Google 文件用,見
   // Code.gs 的 writeNoteBlocks())。走訪順序:<h1>/<h2>/<h3 class="chapter-marker"> 各自是
-  // 對應層級(1/2/3)的 heading 區塊;<mark> 底下的文字帶 highlightColor,<b>/<i> 底下的文字
-  // 帶 bold/italic;<br>/<div>/<p> 這些瀏覽器打字時自然產生的換行/分段元素當作段落邊界。
-  // 相鄰、格式完全相同(粗細/斜體/顏色都一樣)的文字會合併成同一個 run,減少送出的資料量。
+  // 對應層級(1/2/3)的 heading 區塊;<mark> 底下的文字帶 highlightColor,<span data-text-color>
+  // 底下的文字帶 textColor,<b>/<i> 底下的文字帶 bold/italic;<br>/<div>/<p> 這些瀏覽器打字時
+  // 自然產生的換行/分段元素當作段落邊界。相鄰、格式完全相同(粗細/斜體/兩種顏色都一樣)的文字
+  // 會合併成同一個 run,減少送出的資料量。
   function extractNoteBlocks(root) {
     var blocks = [];
     var currentRuns = null;
@@ -1291,10 +1360,14 @@
         blocks.push({ type: 'paragraph', runs: currentRuns });
       }
       var last = currentRuns[currentRuns.length - 1];
-      if (last && last.bold === !!style.bold && last.italic === !!style.italic && last.highlightColor === (style.highlightColor || null)) {
+      if (last && last.bold === !!style.bold && last.italic === !!style.italic &&
+          last.highlightColor === (style.highlightColor || null) && last.textColor === (style.textColor || null)) {
         last.text += text;
       } else {
-        currentRuns.push({ text: text, bold: !!style.bold, italic: !!style.italic, highlightColor: style.highlightColor || null });
+        currentRuns.push({
+          text: text, bold: !!style.bold, italic: !!style.italic,
+          highlightColor: style.highlightColor || null, textColor: style.textColor || null
+        });
       }
     }
 
@@ -1318,17 +1391,22 @@
         return;
       }
       if (tag === 'MARK') {
-        var markStyle = { bold: style.bold, italic: style.italic, highlightColor: node.dataset.color || '#fde047' };
+        var markStyle = { bold: style.bold, italic: style.italic, highlightColor: node.dataset.color || '#fde047', textColor: style.textColor };
         Array.from(node.childNodes).forEach(function (child) { walk(child, markStyle); });
         return;
       }
+      if (tag === 'SPAN' && node.dataset.textColor) {
+        var colorStyle = { bold: style.bold, italic: style.italic, highlightColor: style.highlightColor, textColor: node.dataset.textColor };
+        Array.from(node.childNodes).forEach(function (child) { walk(child, colorStyle); });
+        return;
+      }
       if (tag === 'B' || tag === 'STRONG') {
-        var boldStyle = { bold: true, italic: style.italic, highlightColor: style.highlightColor };
+        var boldStyle = { bold: true, italic: style.italic, highlightColor: style.highlightColor, textColor: style.textColor };
         Array.from(node.childNodes).forEach(function (child) { walk(child, boldStyle); });
         return;
       }
       if (tag === 'I' || tag === 'EM') {
-        var italicStyle = { bold: style.bold, italic: true, highlightColor: style.highlightColor };
+        var italicStyle = { bold: style.bold, italic: true, highlightColor: style.highlightColor, textColor: style.textColor };
         Array.from(node.childNodes).forEach(function (child) { walk(child, italicStyle); });
         return;
       }
