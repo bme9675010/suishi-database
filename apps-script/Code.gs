@@ -421,8 +421,11 @@ function handleDismissCleanup(body, props) {
 
 /**
  * blocks 格式(PWA 端的 extractNoteBlocks() 產生):
- *   [ { type:'heading', text:'第一章' },
- *     { type:'paragraph', runs:[ {text:'一般文字', highlighted:false}, {text:'重點', highlighted:true} ] },
+ *   [ { type:'heading', level: 1|2|3, text:'第一章' },   // level 1=大章、2=節、3=小節
+ *     { type:'paragraph', runs:[
+ *         { text:'一般文字', bold:false, italic:false, highlightColor:null },
+ *         { text:'重點',    bold:true,  italic:false, highlightColor:'#fde047' }
+ *     ] },
  *     ... ]
  */
 function handleSaveNote(body, props) {
@@ -646,6 +649,13 @@ function saveNote(courseTag, blocks, props) {
   return { url: file.getUrl(), name: fileName };
 }
 
+// 章節層級對應 Google 文件內建的標題樣式:1=大章(最大)、2=節、3=小節(最小)。
+const CHAPTER_HEADING_MAP = {
+  1: DocumentApp.ParagraphHeading.HEADING1,
+  2: DocumentApp.ParagraphHeading.HEADING2,
+  3: DocumentApp.ParagraphHeading.HEADING3
+};
+
 /**
  * 把結構化的 blocks(見 handleSaveNote 開頭註解)寫進 Google 文件,取代原本的全部內容。
  */
@@ -656,7 +666,7 @@ function writeNoteBlocks(doc, blocks) {
   blocks.forEach(function (block) {
     const para = body.appendParagraph('');
     if (block.type === 'heading') {
-      para.setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      para.setHeading(CHAPTER_HEADING_MAP[block.level] || DocumentApp.ParagraphHeading.HEADING2);
       para.editAsText().setText(String(block.text || ''));
     } else {
       const text = para.editAsText();
@@ -665,9 +675,10 @@ function writeNoteBlocks(doc, blocks) {
         const runText = String(run.text || '');
         if (!runText) return;
         text.insertText(offset, runText);
-        if (run.highlighted) {
-          text.setBackgroundColor(offset, offset + runText.length - 1, '#fde047');
-        }
+        const end = offset + runText.length - 1;
+        if (run.highlightColor) text.setBackgroundColor(offset, end, run.highlightColor);
+        if (run.bold) text.setBold(offset, end, true);
+        if (run.italic) text.setItalic(offset, end, true);
         offset += runText.length;
       });
     }

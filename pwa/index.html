@@ -113,6 +113,14 @@
   .note-tool-btn:disabled { opacity: .5; }
   .note-tool-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 
+  .swatch-row { justify-content: flex-start; }
+  .highlight-swatch {
+    flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%;
+    border: 2px solid var(--border); cursor: pointer; padding: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .highlight-swatch:disabled { opacity: .5; }
+
   .chapter-nav {
     display: flex; gap: 6px; margin-bottom: 8px; overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -122,6 +130,8 @@
     flex-shrink: 0; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border);
     background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; white-space: nowrap;
   }
+  .chapter-chip.chapter-chip-level-1 { font-weight: 700; color: var(--text); }
+  .chapter-chip.chapter-chip-level-3 { font-size: 11px; opacity: .8; }
 
   .note-editor {
     width: 100%; min-height: 120px; max-height: 50vh; overflow-y: auto;
@@ -135,11 +145,18 @@
   .note-editor mark {
     background: #fde047; color: #1c1917; border-radius: 2px; padding: 0 2px;
   }
-  .note-editor h2.chapter-marker {
-    font-size: 14px; color: var(--accent); border-top: 1px solid var(--border);
+  .note-editor h1.chapter-marker,
+  .note-editor h2.chapter-marker,
+  .note-editor h3.chapter-marker {
+    color: var(--accent); border-top: 1px solid var(--border);
     margin: 14px 0 6px; padding-top: 10px;
   }
-  .note-editor h2.chapter-marker:first-child { border-top: none; margin-top: 0; padding-top: 0; }
+  .note-editor h1.chapter-marker { font-size: 17px; font-weight: 800; }
+  .note-editor h2.chapter-marker { font-size: 15px; font-weight: 700; }
+  .note-editor h3.chapter-marker { font-size: 13px; font-weight: 600; }
+  .note-editor h1.chapter-marker:first-child,
+  .note-editor h2.chapter-marker:first-child,
+  .note-editor h3.chapter-marker:first-child { border-top: none; margin-top: 0; padding-top: 0; }
 
   .save-note-btn {
     width: 100%; padding: 12px; border-radius: 10px; border: none;
@@ -280,13 +297,24 @@
   <div class="course-label" id="noteCourseLabel">目前課程:—</div>
   <div class="note-toolbar">
     <button type="button" class="note-tool-btn" id="insertTimeBtn" disabled>⏱ 時間</button>
-    <button type="button" class="note-tool-btn" id="highlightBtn" disabled>🖍 螢光筆</button>
-    <button type="button" class="note-tool-btn" id="chapterBtn" disabled>§ 章節</button>
+    <button type="button" class="note-tool-btn" id="boldBtn" disabled><b>B</b> 粗體</button>
+    <button type="button" class="note-tool-btn" id="italicBtn" disabled><i>I</i> 斜體</button>
+  </div>
+  <div class="note-toolbar swatch-row">
+    <button type="button" class="highlight-swatch" data-color="#fde047" style="background:#fde047" disabled title="黃色重點"></button>
+    <button type="button" class="highlight-swatch" data-color="#86efac" style="background:#86efac" disabled title="綠色重點"></button>
+    <button type="button" class="highlight-swatch" data-color="#f9a8d4" style="background:#f9a8d4" disabled title="粉紅重點"></button>
+    <button type="button" class="highlight-swatch" data-color="#93c5fd" style="background:#93c5fd" disabled title="藍色重點"></button>
+  </div>
+  <div class="note-toolbar">
+    <button type="button" class="note-tool-btn" id="chapter1Btn" disabled>大章</button>
+    <button type="button" class="note-tool-btn" id="chapter2Btn" disabled>節</button>
+    <button type="button" class="note-tool-btn" id="chapter3Btn" disabled>小節</button>
   </div>
   <div class="chapter-nav" id="chapterNav"></div>
   <div class="note-editor" id="noteEditor" contenteditable="true" data-placeholder="打字記筆記,存檔會自動歸到上面選的課程…"></div>
   <button class="save-note-btn" id="saveNoteBtn" disabled>儲存筆記</button>
-  <p class="hint-text">同一天、同一課程重複存檔會更新同一份筆記,不會變成好幾個檔案。選取文字點「🖍 螢光筆」上色標記重點。「§ 章節」插入章節標題,上方會出現可以點擊跳轉的導覽列。</p>
+  <p class="hint-text">同一天、同一課程重複存檔會更新同一份筆記,不會變成好幾個檔案。選取文字後點顏色圓點上色標記重點,點「粗體/斜體」加格式。「大章/節/小節」插入三種層級的章節標題,上方會出現可以點擊跳轉的導覽列。</p>
 </div>
 
 <div class="card">
@@ -389,8 +417,12 @@
   var saveNoteBtn = document.getElementById('saveNoteBtn');
   var noteCourseLabelEl = document.getElementById('noteCourseLabel');
   var insertTimeBtn = document.getElementById('insertTimeBtn');
-  var highlightBtn = document.getElementById('highlightBtn');
-  var chapterBtn = document.getElementById('chapterBtn');
+  var boldBtn = document.getElementById('boldBtn');
+  var italicBtn = document.getElementById('italicBtn');
+  var highlightSwatches = document.querySelectorAll('.highlight-swatch');
+  var chapter1Btn = document.getElementById('chapter1Btn');
+  var chapter2Btn = document.getElementById('chapter2Btn');
+  var chapter3Btn = document.getElementById('chapter3Btn');
   var uploadAudioBtn = document.getElementById('uploadAudioBtn');
   var audioFileInput = document.getElementById('audioFileInput');
   var audioCourseLabelEl = document.getElementById('audioCourseLabel');
@@ -883,8 +915,12 @@
     saveNoteBtn.disabled = !isConfigured();
     uploadAudioBtn.disabled = !isConfigured();
     insertTimeBtn.disabled = !isConfigured();
-    highlightBtn.disabled = !isConfigured();
-    chapterBtn.disabled = !isConfigured();
+    boldBtn.disabled = !isConfigured();
+    italicBtn.disabled = !isConfigured();
+    highlightSwatches.forEach(function (btn) { btn.disabled = !isConfigured(); });
+    chapter1Btn.disabled = !isConfigured();
+    chapter2Btn.disabled = !isConfigured();
+    chapter3Btn.disabled = !isConfigured();
   }
 
   // ---------- IndexedDB 佇列 ----------
@@ -1152,50 +1188,63 @@
     applyRange(range);
   }
 
-  // 把目前選取的文字包進 <mark> 標籤(真的上色螢光筆效果)。沒有選取文字時,插入一個
-  // 內含零寬字元的空白 <mark>,讓游標能停在裡面繼續打字,打的字自然就是螢光筆效果。
-  function wrapSelectionWithMark() {
+  // 把目前選取的文字包進 makeElement() 產生的元素裡(螢光筆/粗體/斜體共用)。沒有選取文字時,
+  // 插入一個內含零寬字元的空白元素,讓游標能停在裡面繼續打字,打的字自然套用格式。
+  function wrapSelection(makeElement) {
     var range = getEditorRange();
-    var mark = document.createElement('mark');
+    var el = makeElement();
     if (range.collapsed) {
-      mark.appendChild(document.createTextNode('​'));
-      range.insertNode(mark);
-      range.setStart(mark.firstChild, 1);
-      range.setEnd(mark.firstChild, 1);
+      el.appendChild(document.createTextNode('​'));
+      range.insertNode(el);
+      range.setStart(el.firstChild, 1);
+      range.setEnd(el.firstChild, 1);
     } else {
-      mark.appendChild(range.extractContents());
-      range.insertNode(mark);
-      range.setStartAfter(mark);
-      range.setEndAfter(mark);
+      el.appendChild(range.extractContents());
+      range.insertNode(el);
+      range.setStartAfter(el);
+      range.setEndAfter(el);
     }
     applyRange(range);
   }
 
-  // 插入一個章節標題(<h2>),插入點是目前游標位置(如果剛好選取了文字,標題插在選取範圍
-  // 開頭之前,不會吃掉選取的文字)。插入後重繪章節導覽列。
-  function insertChapter(title) {
+  function applyHighlight(color) {
+    wrapSelection(function () {
+      var mark = document.createElement('mark');
+      mark.style.backgroundColor = color;
+      mark.dataset.color = color;
+      return mark;
+    });
+  }
+
+  // 插入一個章節標題(<h1>/<h2>/<h3>,對應大章/節/小節三種層級),插入點是目前游標位置
+  // (如果剛好選取了文字,標題插在選取範圍開頭之前,不會吃掉選取的文字)。插入後重繪章節導覽列。
+  function insertChapterAtLevel(level) {
+    var title = prompt('章節標題:');
+    if (title === null) return; // 取消
     var range = getEditorRange();
     range.collapse(true);
-    var h2 = document.createElement('h2');
-    h2.className = 'chapter-marker';
-    h2.textContent = title;
-    range.insertNode(h2);
+    var tag = level === 1 ? 'h1' : (level === 2 ? 'h2' : 'h3');
+    var heading = document.createElement(tag);
+    heading.className = 'chapter-marker';
+    heading.textContent = title.trim() || '章節';
+    range.insertNode(heading);
     var br = document.createElement('br');
-    h2.after(br);
+    heading.after(br);
     range.setStartAfter(br);
     range.setEndAfter(br);
     applyRange(range);
   }
 
-  // 掃描編輯器裡所有章節標題,重繪上方的導覽列(小 chip,點了捲動到該章節)。
+  // 掃描編輯器裡所有章節標題(h1~h3.chapter-marker),重繪上方的導覽列(小 chip,點了捲動到該章節)。
   function renderChapterNav() {
-    var headings = noteEditor.querySelectorAll('h2.chapter-marker');
+    var headings = noteEditor.querySelectorAll('h1.chapter-marker, h2.chapter-marker, h3.chapter-marker');
     chapterNavEl.innerHTML = '';
     headings.forEach(function (h, i) {
       h.id = 'chapter-' + i;
+      var level = h.tagName === 'H1' ? 1 : (h.tagName === 'H2' ? 2 : 3);
       var chip = document.createElement('button');
       chip.type = 'button';
-      chip.className = 'chapter-chip';
+      chip.className = 'chapter-chip chapter-chip-level-' + level;
       chip.textContent = h.textContent || '章節';
       chip.addEventListener('click', function () {
         h.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1209,25 +1258,32 @@
     insertTextAtCursor(stamp);
   });
 
-  highlightBtn.addEventListener('click', function () {
-    wrapSelectionWithMark();
+  boldBtn.addEventListener('click', function () {
+    wrapSelection(function () { return document.createElement('b'); });
   });
 
-  chapterBtn.addEventListener('click', function () {
-    var title = prompt('章節標題:');
-    if (title === null) return; // 取消
-    insertChapter(title.trim() || '章節');
+  italicBtn.addEventListener('click', function () {
+    wrapSelection(function () { return document.createElement('i'); });
   });
+
+  highlightSwatches.forEach(function (btn) {
+    btn.addEventListener('click', function () { applyHighlight(btn.dataset.color); });
+  });
+
+  chapter1Btn.addEventListener('click', function () { insertChapterAtLevel(1); });
+  chapter2Btn.addEventListener('click', function () { insertChapterAtLevel(2); });
+  chapter3Btn.addEventListener('click', function () { insertChapterAtLevel(3); });
 
   // 把編輯器的 DOM 結構轉成後端看得懂的結構化段落陣列(存成原生 Google 文件用,見
-  // Code.gs 的 writeNoteBlocks())。走訪順序:<h2 class="chapter-marker"> 各自是一個
-  // heading 區塊;<mark> 底下的文字算 highlighted 的 run;<br>/<div>/<p> 這些瀏覽器打字
-  // 時自然產生的換行/分段元素當作段落邊界。相鄰同樣是否標記的文字會合併成同一個 run。
+  // Code.gs 的 writeNoteBlocks())。走訪順序:<h1>/<h2>/<h3 class="chapter-marker"> 各自是
+  // 對應層級(1/2/3)的 heading 區塊;<mark> 底下的文字帶 highlightColor,<b>/<i> 底下的文字
+  // 帶 bold/italic;<br>/<div>/<p> 這些瀏覽器打字時自然產生的換行/分段元素當作段落邊界。
+  // 相鄰、格式完全相同(粗細/斜體/顏色都一樣)的文字會合併成同一個 run,減少送出的資料量。
   function extractNoteBlocks(root) {
     var blocks = [];
     var currentRuns = null;
 
-    function pushRun(text, highlighted) {
+    function pushRun(text, style) {
       text = text.replace(/​/g, ''); // 去掉螢光筆空白標記用的零寬字元,不是真的內容
       if (!text) return;
       if (!currentRuns) {
@@ -1235,24 +1291,25 @@
         blocks.push({ type: 'paragraph', runs: currentRuns });
       }
       var last = currentRuns[currentRuns.length - 1];
-      if (last && last.highlighted === highlighted) {
+      if (last && last.bold === !!style.bold && last.italic === !!style.italic && last.highlightColor === (style.highlightColor || null)) {
         last.text += text;
       } else {
-        currentRuns.push({ text: text, highlighted: highlighted });
+        currentRuns.push({ text: text, bold: !!style.bold, italic: !!style.italic, highlightColor: style.highlightColor || null });
       }
     }
 
-    function walk(node, highlighted) {
+    function walk(node, style) {
       if (node.nodeType === Node.TEXT_NODE) {
-        pushRun(node.textContent, highlighted);
+        pushRun(node.textContent, style);
         return;
       }
       if (node.nodeType !== Node.ELEMENT_NODE) return;
 
       var tag = node.tagName;
-      if (tag === 'H2') {
-        var headingText = node.textContent.replace(/​/g, '');
-        if (headingText) blocks.push({ type: 'heading', text: headingText });
+      if (tag === 'H1' || tag === 'H2' || tag === 'H3') {
+        var level = tag === 'H1' ? 1 : (tag === 'H2' ? 2 : 3);
+        var headingText = node.textContent.replace(/​/g, '').trim();
+        if (headingText) blocks.push({ type: 'heading', level: level, text: headingText });
         currentRuns = null;
         return;
       }
@@ -1261,19 +1318,30 @@
         return;
       }
       if (tag === 'MARK') {
-        Array.from(node.childNodes).forEach(function (child) { walk(child, true); });
+        var markStyle = { bold: style.bold, italic: style.italic, highlightColor: node.dataset.color || '#fde047' };
+        Array.from(node.childNodes).forEach(function (child) { walk(child, markStyle); });
+        return;
+      }
+      if (tag === 'B' || tag === 'STRONG') {
+        var boldStyle = { bold: true, italic: style.italic, highlightColor: style.highlightColor };
+        Array.from(node.childNodes).forEach(function (child) { walk(child, boldStyle); });
+        return;
+      }
+      if (tag === 'I' || tag === 'EM') {
+        var italicStyle = { bold: style.bold, italic: true, highlightColor: style.highlightColor };
+        Array.from(node.childNodes).forEach(function (child) { walk(child, italicStyle); });
         return;
       }
       if (tag === 'DIV' || tag === 'P') {
         currentRuns = null;
-        Array.from(node.childNodes).forEach(function (child) { walk(child, highlighted); });
+        Array.from(node.childNodes).forEach(function (child) { walk(child, style); });
         currentRuns = null;
         return;
       }
-      Array.from(node.childNodes).forEach(function (child) { walk(child, highlighted); });
+      Array.from(node.childNodes).forEach(function (child) { walk(child, style); });
     }
 
-    Array.from(root.childNodes).forEach(function (node) { walk(node, false); });
+    Array.from(root.childNodes).forEach(function (node) { walk(node, {}); });
 
     // 濾掉沒有任何文字內容的空段落(例如只剩一個 <br> 造成的空 paragraph)
     return blocks.filter(function (b) {
