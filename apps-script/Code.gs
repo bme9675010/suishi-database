@@ -222,7 +222,10 @@ function extractFileId(url) {
  * GET 端點:
  *   ?action=courses&passKey=xxx              → 回傳課程標籤清單 (PWA 開啟時抓取,需帶金鑰)
  *   ?action=pendingCleanup&passKey=xxx       → 回傳「已從清單刪除但 Drive 資料夾還在」的待清理提醒
- *   ?action=listFiles&course=X&passKey=xxx   → 回傳某課程底下所有照片/錄音清單
+ *   ?action=listFiles&course=X&passKey=xxx   → 回傳某課程底下所有照片/錄音/筆記清單
+ *   ?action=getNoteContent&fileId=X&passKey=xxx → 回傳筆記檔案的原始 HTML 內容(給 App 自己算圖,
+ *                                              因為 Drive 的內建預覽不會把 .html 檔案當網頁執行,
+ *                                              只會顯示原始標籤文字,所以筆記改由 App 自己讀內容渲染)
  *   (無參數)                                 → 健康檢查,瀏覽器打開網址確認服務正常
  */
 function doGet(e) {
@@ -261,6 +264,22 @@ function doGet(e) {
     }
     const files = getFilesForCourse(String(e.parameter.course || ''), props);
     return jsonResponse({ ok: true, files: files });
+  }
+
+  if (action === 'getNoteContent') {
+    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+      return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
+    const fileId = String(e.parameter.fileId || '');
+    if (!fileId) {
+      return jsonResponse({ ok: false, error: 'missing fileId' });
+    }
+    try {
+      const html = DriveApp.getFileById(fileId).getBlob().getDataAsString('UTF-8');
+      return jsonResponse({ ok: true, html: html });
+    } catch (err) {
+      return jsonResponse({ ok: false, error: String(err) });
+    }
   }
 
   return jsonResponse({ ok: true, message: '隨時資料庫 API 運作中' });
