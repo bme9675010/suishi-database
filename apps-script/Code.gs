@@ -223,9 +223,6 @@ function extractFileId(url) {
  *   ?action=courses&passKey=xxx              → 回傳課程標籤清單 (PWA 開啟時抓取,需帶金鑰)
  *   ?action=pendingCleanup&passKey=xxx       → 回傳「已從清單刪除但 Drive 資料夾還在」的待清理提醒
  *   ?action=listFiles&course=X&passKey=xxx   → 回傳某課程底下所有照片/錄音/筆記清單
- *   ?action=getNoteContent&fileId=X&passKey=xxx → 回傳筆記檔案的原始 HTML 內容(給 App 自己算圖,
- *                                              因為 Drive 的內建預覽不會把 .html 檔案當網頁執行,
- *                                              只會顯示原始標籤文字,所以筆記改由 App 自己讀內容渲染)
  *   (無參數)                                 → 健康檢查,瀏覽器打開網址確認服務正常
  */
 function doGet(e) {
@@ -266,22 +263,6 @@ function doGet(e) {
     return jsonResponse({ ok: true, files: files });
   }
 
-  if (action === 'getNoteContent') {
-    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
-      return jsonResponse({ ok: false, error: 'unauthorized' });
-    }
-    const fileId = String(e.parameter.fileId || '');
-    if (!fileId) {
-      return jsonResponse({ ok: false, error: 'missing fileId' });
-    }
-    try {
-      const html = DriveApp.getFileById(fileId).getBlob().getDataAsString('UTF-8');
-      return jsonResponse({ ok: true, html: html });
-    } catch (err) {
-      return jsonResponse({ ok: false, error: String(err) });
-    }
-  }
-
   return jsonResponse({ ok: true, message: '隨時資料庫 API 運作中' });
 }
 
@@ -313,9 +294,12 @@ function getFilesForCourse(courseName, props) {
  *   action: 'addCourse'     → PWA 新增課程用。Body: { passKey, action, courseName }
  *   action: 'removeCourse'  → PWA 刪除課程用。Body: { passKey, action, courseName }
  *   action: 'dismissCleanup'→ PWA 確認已手動清理 Drive 用。Body: { passKey, action, courseName }
- *   action: 'saveNote'      → PWA 課堂筆記存檔用。Body: { passKey, action, courseName, text }
- *                              同一天、同一課程共用同一個檔案,重複呼叫是覆蓋更新,不會累積出
- *                              一堆零碎檔案(見 saveNote())。文字內容直接放 JSON 字串,不用 base64。
+ *   action: 'saveNote'      → PWA 課堂筆記存檔用。Body: { passKey, action, courseName, blocks }
+ *                              同一天、同一課程共用同一份 Google 文件,重複呼叫是覆蓋更新,不會
+ *                              累積出一堆零碎檔案(見 saveNote())。blocks 是結構化的段落陣列
+ *                              (見 handleSaveNote() 開頭註解),不是 HTML 字串——直接存成原生
+ *                              Google 文件,才能在 Drive 裡點開就正常顯示螢光筆/標題格式,不用
+ *                              自己另外做檢視器(Drive 內建預覽不會執行 .html 檔案裡的格式)。
  *   (無 action)             → PWA 拍照/錄音檔上傳用。Body: { passKey, filename, mimeType, base64Data, tag, type }
  *                              type 是 'photo'(預設,拍照)或 'audio'(其他裝置錄的音檔;也相容
  *                              舊版課堂筆記用過的 'note',只是新版筆記都改走 saveNote 這個 action 了)。
@@ -435,16 +419,26 @@ function handleDismissCleanup(body, props) {
   return jsonResponse({ ok: true, pending: pending });
 }
 
+/**
+ * blocks 格式(PWA 端的 extractNoteBlocks() 產生):
+ *   [ { type:'heading', text:'第一章' },
+ *     { type:'paragraph', runs:[ {text:'一般文字', highlighted:false}, {text:'重點', highlighted:true} ] },
+ *     ... ]
+ */
 function handleSaveNote(body, props) {
-  const text = String(body.text || '');
-  if (!text.trim()) {
+  const blocks = Array.isArray(body.blocks) ? body.blocks : [];
+  const hasContent = blocks.some(function (b) {
+    if (b.type === 'heading') return String(b.text || '').trim().length > 0;
+    return (b.runs || []).some(function (r) { return String(r.text || '').trim().length > 0; });
+  });
+  if (!hasContent) {
     return jsonResponse({ ok: false, error: 'empty note' });
   }
   const tag = String(body.courseName || '').trim();
   if (!tag) {
     return jsonResponse({ ok: false, error: 'missing courseName' });
   }
-  const result = saveNote(tag, text, props);
+  const result = saveNote(tag, blocks, props);
   return jsonResponse({ ok: true, url: result.url, name: result.name });
 }
 
@@ -601,15 +595,15 @@ function getOrCreateFolder(parent, name) {
 
 /**
  * 課堂筆記專用的儲存邏輯,跟 fileIntoLibrary 不同:fileIntoLibrary 每次呼叫都建一個新檔案
- * (適合拍照/錄音這種一次性紀錄),saveNote 則是「同一天、同一課程共用同一個檔案」——
- * 檔名用日期(不含時分秒)決定,同一天內重複呼叫會覆蓋更新同一個檔案內容,不會累積出
+ * (適合拍照/錄音這種一次性紀錄),saveNote 則是「同一天、同一課程共用同一份文件」——
+ * 檔名用日期(不含時分秒)決定,同一天內重複呼叫會覆蓋更新同一份文件內容,不會累積出
  * 一堂課存好幾次、變成好幾個零碎檔案的狀況。
  *
- * 存成 .html(不是純文字):PWA 端的筆記編輯器是 contenteditable,text 傳進來的是它的
- * innerHTML(可能包含 <mark> 螢光筆標記、<h2> 章節標題),用 HTML mimetype 存檔案打開時
- * 才會正確顯示格式,不是看到一堆標籤符號。
+ * 存成原生 Google 文件(不是 .html 檔案):Drive 內建預覽不會把 .html 檔案當網頁執行,只會
+ * 顯示原始標籤文字,踩過這個雷。改用 DocumentApp 直接建立/更新真正的 Google 文件,在 Drive
+ * 裡點開就會正常顯示螢光筆底色跟章節標題格式,不用另外做檢視器。
  */
-function saveNote(courseTag, text, props) {
+function saveNote(courseTag, blocks, props) {
   const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
   const now = new Date();
 
@@ -624,21 +618,66 @@ function saveNote(courseTag, text, props) {
   const monthFolder = getOrCreateFolder(yearFolder, mm);
   const noteFolder = getOrCreateFolder(monthFolder, TYPE_FOLDER_NAME.note);
 
-  const fileName = TYPE_FOLDER_NAME.note + '_' + yyyy + mm + dd + '_' + safeTag + '.html';
+  const fileName = TYPE_FOLDER_NAME.note + '_' + yyyy + mm + dd + '_' + safeTag;
   const existing = noteFolder.getFilesByName(fileName);
   const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
 
-  let file;
+  let doc;
+  let isNew = false;
   if (existing.hasNext()) {
-    file = existing.next();
-    file.setContent(text);
-    updateIndexRowTime(sheet, file.getUrl(), now); // 讓瀏覽清單排序反映「最後編輯時間」而不是第一次建立時間
+    doc = DocumentApp.openById(existing.next().getId());
   } else {
-    file = noteFolder.createFile(fileName, text, MimeType.HTML);
+    doc = DocumentApp.create(fileName);
+    isNew = true;
+  }
+
+  writeNoteBlocks(doc, blocks);
+  doc.saveAndClose();
+
+  const file = DriveApp.getFileById(doc.getId());
+  if (isNew) {
+    noteFolder.addFile(file);
+    DriveApp.getRootFolder().removeFile(file); // DocumentApp.create() 一律先建在 Drive 根目錄,建好要手動搬過去
     sheet.appendRow([now, TYPE_FOLDER_NAME.note, safeTag, fileName, file.getUrl(), 'PWA', '']);
+  } else {
+    updateIndexRowTime(sheet, file.getUrl(), now); // 讓瀏覽清單排序反映「最後編輯時間」而不是第一次建立時間
   }
 
   return { url: file.getUrl(), name: fileName };
+}
+
+/**
+ * 把結構化的 blocks(見 handleSaveNote 開頭註解)寫進 Google 文件,取代原本的全部內容。
+ */
+function writeNoteBlocks(doc, blocks) {
+  const body = doc.getBody();
+  body.clear();
+
+  blocks.forEach(function (block) {
+    const para = body.appendParagraph('');
+    if (block.type === 'heading') {
+      para.setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      para.editAsText().setText(String(block.text || ''));
+    } else {
+      const text = para.editAsText();
+      let offset = 0;
+      (block.runs || []).forEach(function (run) {
+        const runText = String(run.text || '');
+        if (!runText) return;
+        text.insertText(offset, runText);
+        if (run.highlighted) {
+          text.setBackgroundColor(offset, offset + runText.length - 1, '#fde047');
+        }
+        offset += runText.length;
+      });
+    }
+  });
+
+  // body.clear() 會留下一個空段落,我們的內容都是後來 append 上去的,所以最前面那個
+  // 空段落要清掉,不然筆記開頭會多一行空白。用數量差判斷,不假設 clear() 的確切行為。
+  if (blocks.length > 0 && body.getNumChildren() > blocks.length) {
+    body.removeChild(body.getChild(0));
+  }
 }
 
 /**

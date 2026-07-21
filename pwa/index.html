@@ -141,10 +141,6 @@
   }
   .note-editor h2.chapter-marker:first-child { border-top: none; margin-top: 0; padding-top: 0; }
 
-  .note-view-frame {
-    width: 100%; min-height: 200px; max-height: 55vh;
-    border: 1px solid var(--border); border-radius: 10px; background: #0f172a;
-  }
   .save-note-btn {
     width: 100%; padding: 12px; border-radius: 10px; border: none;
     background: var(--accent); color: var(--accent-text);
@@ -355,17 +351,6 @@
   </div>
 </dialog>
 
-<dialog id="viewNoteDialog">
-  <div class="dialog-body">
-    <h3 id="viewNoteTitle">筆記內容</h3>
-    <iframe class="note-view-frame" id="viewNoteFrame" sandbox=""></iframe>
-    <p class="hint-text"><a id="viewNoteDriveLink" href="#" target="_blank" rel="noopener">在 Google Drive 開啟原始檔案</a></p>
-    <div class="dialog-actions">
-      <button id="closeViewNote">關閉</button>
-    </div>
-  </div>
-</dialog>
-
 <div id="toast"></div>
 
 <script>
@@ -399,10 +384,6 @@
   var browseCourseDialog = document.getElementById('browseCourseDialog');
   var browseCourseTitleEl = document.getElementById('browseCourseTitle');
   var browseCourseListEl = document.getElementById('browseCourseList');
-  var viewNoteDialog = document.getElementById('viewNoteDialog');
-  var viewNoteTitleEl = document.getElementById('viewNoteTitle');
-  var viewNoteFrameEl = document.getElementById('viewNoteFrame');
-  var viewNoteDriveLinkEl = document.getElementById('viewNoteDriveLink');
   var noteEditor = document.getElementById('noteEditor');
   var chapterNavEl = document.getElementById('chapterNav');
   var saveNoteBtn = document.getElementById('saveNoteBtn');
@@ -654,19 +635,11 @@
     files.forEach(function (f) {
       var li = document.createElement('li');
       var a = document.createElement('a');
-      // 筆記是 .html 檔,Drive 內建預覽不會把它當網頁執行、只會顯示原始標籤文字,
-      // 所以筆記改成點了在 App 裡自己讀內容渲染;照片/錄音維持原本直接開 Drive。
-      if (f.type === '筆記') {
-        a.href = '#';
-        a.addEventListener('click', function (e) {
-          e.preventDefault();
-          openNoteViewer(f.filename, f.url);
-        });
-      } else {
-        a.href = f.url;
-        a.target = '_blank';
-        a.rel = 'noopener';
-      }
+      // 筆記存的是原生 Google 文件,Drive 點開就會正常顯示螢光筆/章節格式,
+      // 直接連過去即可,不用額外做檢視器。
+      a.href = f.url;
+      a.target = '_blank';
+      a.rel = 'noopener';
 
       var icon = document.createElement('span');
       icon.className = 'browse-icon';
@@ -686,52 +659,6 @@
       li.appendChild(a);
       browseCourseListEl.appendChild(li);
     });
-  }
-
-  // ---------- 筆記檢視器 ----------
-  // Drive 的內建預覽不會執行 .html 檔案(只會顯示原始標籤文字當純文字),所以筆記自己讀取
-  // 原始內容、包成一個小 HTML 文件塞進「沙盒」iframe(沒有 allow-scripts/allow-same-origin,
-  // 就算內容裡意外混進 script 標籤也不會執行、也拿不到主頁面的 localStorage/PASS_KEY)。
-  document.getElementById('closeViewNote').addEventListener('click', function () {
-    viewNoteDialog.close();
-    viewNoteFrameEl.srcdoc = '';
-  });
-
-  function extractFileIdFromUrl(url) {
-    var m = String(url || '').match(/\/d\/([a-zA-Z0-9_-]+)/);
-    return m ? m[1] : '';
-  }
-
-  function wrapNoteHtml(bodyHtml) {
-    return '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>' +
-      'body{background:#0f172a;color:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,"PingFang TC",sans-serif;' +
-      'font-size:14px;line-height:1.6;padding:12px;margin:0;}' +
-      'mark{background:#fde047;color:#1c1917;border-radius:2px;padding:0 2px;}' +
-      'h2.chapter-marker{font-size:14px;color:#38bdf8;border-top:1px solid #334155;margin:14px 0 6px;padding-top:10px;}' +
-      'h2.chapter-marker:first-child{border-top:none;margin-top:0;padding-top:0;}' +
-      '</style></head><body>' + bodyHtml + '</body></html>';
-  }
-
-  function openNoteViewer(name, driveUrl) {
-    viewNoteTitleEl.textContent = name;
-    viewNoteDriveLinkEl.href = driveUrl;
-    viewNoteFrameEl.srcdoc = wrapNoteHtml('<p style="color:#94a3b8;">載入中…</p>');
-    viewNoteDialog.showModal();
-
-    var fileId = extractFileIdFromUrl(driveUrl);
-    if (!fileId) {
-      viewNoteFrameEl.srcdoc = wrapNoteHtml('<p style="color:#f87171;">找不到檔案 ID</p>');
-      return;
-    }
-    fetch(settings.gasUrl + '?action=getNoteContent&fileId=' + encodeURIComponent(fileId) + '&passKey=' + encodeURIComponent(settings.passKey))
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.ok) viewNoteFrameEl.srcdoc = wrapNoteHtml(data.html);
-        else viewNoteFrameEl.srcdoc = wrapNoteHtml('<p style="color:#f87171;">載入失敗</p>');
-      })
-      .catch(function () {
-        viewNoteFrameEl.srcdoc = wrapNoteHtml('<p style="color:#94a3b8;">離線中,無法載入</p>');
-      });
   }
 
   function formatBrowseTime(iso) {
@@ -1003,10 +930,10 @@
 
   // ---------- 上傳 ----------
   function uploadItem(item) {
-    // 筆記走 saveNote(純文字,直接放 JSON,不用 base64);拍照/錄音走原本的 base64 上傳。
+    // 筆記走 saveNote(結構化的 blocks,不用 base64);拍照/錄音走原本的 base64 上傳。
     // 用 text/plain 避免瀏覽器對 GAS 發出 CORS 預檢請求 (GAS 不支援 OPTIONS)
     var body = item.kind === 'note'
-      ? { passKey: settings.passKey, action: 'saveNote', courseName: item.tag, text: item.text }
+      ? { passKey: settings.passKey, action: 'saveNote', courseName: item.tag, blocks: item.blocks }
       : {
           passKey: settings.passKey,
           filename: item.filename,
@@ -1292,14 +1219,79 @@
     insertChapter(title.trim() || '章節');
   });
 
+  // 把編輯器的 DOM 結構轉成後端看得懂的結構化段落陣列(存成原生 Google 文件用,見
+  // Code.gs 的 writeNoteBlocks())。走訪順序:<h2 class="chapter-marker"> 各自是一個
+  // heading 區塊;<mark> 底下的文字算 highlighted 的 run;<br>/<div>/<p> 這些瀏覽器打字
+  // 時自然產生的換行/分段元素當作段落邊界。相鄰同樣是否標記的文字會合併成同一個 run。
+  function extractNoteBlocks(root) {
+    var blocks = [];
+    var currentRuns = null;
+
+    function pushRun(text, highlighted) {
+      text = text.replace(/​/g, ''); // 去掉螢光筆空白標記用的零寬字元,不是真的內容
+      if (!text) return;
+      if (!currentRuns) {
+        currentRuns = [];
+        blocks.push({ type: 'paragraph', runs: currentRuns });
+      }
+      var last = currentRuns[currentRuns.length - 1];
+      if (last && last.highlighted === highlighted) {
+        last.text += text;
+      } else {
+        currentRuns.push({ text: text, highlighted: highlighted });
+      }
+    }
+
+    function walk(node, highlighted) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        pushRun(node.textContent, highlighted);
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+      var tag = node.tagName;
+      if (tag === 'H2') {
+        var headingText = node.textContent.replace(/​/g, '');
+        if (headingText) blocks.push({ type: 'heading', text: headingText });
+        currentRuns = null;
+        return;
+      }
+      if (tag === 'BR') {
+        currentRuns = null;
+        return;
+      }
+      if (tag === 'MARK') {
+        Array.from(node.childNodes).forEach(function (child) { walk(child, true); });
+        return;
+      }
+      if (tag === 'DIV' || tag === 'P') {
+        currentRuns = null;
+        Array.from(node.childNodes).forEach(function (child) { walk(child, highlighted); });
+        currentRuns = null;
+        return;
+      }
+      Array.from(node.childNodes).forEach(function (child) { walk(child, highlighted); });
+    }
+
+    Array.from(root.childNodes).forEach(function (node) { walk(node, false); });
+
+    // 濾掉沒有任何文字內容的空段落(例如只剩一個 <br> 造成的空 paragraph)
+    return blocks.filter(function (b) {
+      if (b.type === 'heading') return true;
+      return b.runs.some(function (r) { return r.text.trim().length > 0; });
+    });
+  }
+
   saveNoteBtn.addEventListener('click', function () {
-    var text = noteEditor.innerHTML;
-    if (!noteEditor.textContent.trim()) { toast('筆記是空的'); return; }
+    // .trim() 不會去掉螢光筆空白標記用的零寬字元(U+200B),要先自己濾掉再判斷是否真的有內容,
+    // 不然「點了螢光筆但沒打字就存檔」會被漏放過去,送到後端才被拒絕,卡在離線佇列裡一直重試失敗。
+    if (!noteEditor.textContent.replace(/​/g, '').trim()) { toast('筆記是空的'); return; }
     if (!activeCourse) { toast('請先選課程'); return; }
 
+    var blocks = extractNoteBlocks(noteEditor);
     var now = new Date();
     var stamp = now.toLocaleString('zh-TW', { hour12: false });
-    var item = { kind: 'note', tag: activeCourse, text: text, time: stamp, type: 'note' };
+    var item = { kind: 'note', tag: activeCourse, blocks: blocks, time: stamp, type: 'note' };
     queueAdd(item).then(function () {
       pushLog({ tag: item.tag, time: item.time, state: 'pending', type: item.type });
       refreshQueueInfo();
