@@ -102,6 +102,19 @@
   }
   .status-row.warn { color: #fbbf24; }
 
+  .note-course-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .note-textarea {
+    width: 100%; min-height: 120px; padding: 10px; border-radius: 10px;
+    border: 1px solid var(--border); background: #0f172a; color: var(--text);
+    font-size: 14px; font-family: inherit; resize: vertical;
+  }
+  .save-note-btn {
+    width: 100%; padding: 12px; border-radius: 10px; border: none;
+    background: var(--accent); color: var(--accent-text);
+    font-size: 15px; font-weight: 700; margin-top: 10px;
+  }
+  .save-note-btn:disabled { opacity: .5; }
+
   ul.log { list-style: none; margin: 0; padding: 0; }
   ul.log li {
     display: flex; justify-content: space-between; gap: 8px;
@@ -220,6 +233,13 @@
 </div>
 
 <div class="card">
+  <h2>課堂筆記</h2>
+  <div class="note-course-label" id="noteCourseLabel">目前課程:—</div>
+  <textarea class="note-textarea" id="noteTextarea" placeholder="打字記筆記,存檔會自動歸到上面選的課程…" disabled></textarea>
+  <button class="save-note-btn" id="saveNoteBtn" disabled>儲存筆記</button>
+</div>
+
+<div class="card">
   <h2>最近上傳</h2>
   <ul class="log" id="logList"><li class="empty">還沒有紀錄</li></ul>
 </div>
@@ -314,6 +334,9 @@
   var browseCourseDialog = document.getElementById('browseCourseDialog');
   var browseCourseTitleEl = document.getElementById('browseCourseTitle');
   var browseCourseListEl = document.getElementById('browseCourseList');
+  var noteTextarea = document.getElementById('noteTextarea');
+  var saveNoteBtn = document.getElementById('saveNoteBtn');
+  var noteCourseLabelEl = document.getElementById('noteCourseLabel');
 
   var activeCourse = localStorage.getItem('activeCourse') || '';
   var recentLog = [];
@@ -548,7 +571,7 @@
 
   function renderBrowseCourseList(files) {
     if (!files || files.length === 0) {
-      browseCourseListEl.innerHTML = '<li class="empty">這門課還沒有任何照片或錄音</li>';
+      browseCourseListEl.innerHTML = '<li class="empty">這門課還沒有任何照片、錄音或筆記</li>';
       return;
     }
     browseCourseListEl.innerHTML = '';
@@ -561,7 +584,7 @@
 
       var icon = document.createElement('span');
       icon.className = 'browse-icon';
-      icon.textContent = f.type === '照片' ? '📷' : (f.type === '錄音' ? '🎙️' : '📄');
+      icon.textContent = f.type === '照片' ? '📷' : (f.type === '錄音' ? '🎙️' : (f.type === '筆記' ? '📝' : '📄'));
 
       var name = document.createElement('span');
       name.className = 'browse-name';
@@ -694,6 +717,11 @@
     touchRecency(c);
     renderCourseGrid();
     renderRecent();
+    renderNoteCourseLabel();
+  }
+
+  function renderNoteCourseLabel() {
+    noteCourseLabelEl.textContent = '目前課程:' + (activeCourse || '—');
   }
 
   function makeChip(c) {
@@ -751,6 +779,7 @@
     }
     renderRecent();
     renderCourseGrid();
+    renderNoteCourseLabel();
   }
 
   courseSearchInput.addEventListener('input', renderCourseGrid);
@@ -785,6 +814,8 @@
 
   function updateShootEnabled() {
     shootBtn.disabled = !isConfigured();
+    noteTextarea.disabled = !isConfigured();
+    saveNoteBtn.disabled = !isConfigured();
   }
 
   // ---------- IndexedDB 佇列 ----------
@@ -839,7 +870,8 @@
         filename: item.filename,
         mimeType: item.mimeType,
         base64Data: item.base64Data,
-        tag: item.tag
+        tag: item.tag,
+        type: item.type || 'photo'
       })
     }).then(function (r) { return r.json(); });
   }
@@ -860,7 +892,7 @@
       var li = document.createElement('li');
       var name = document.createElement('span');
       name.className = 'name';
-      name.textContent = e.tag + ' · ' + e.time;
+      name.textContent = (e.type === 'note' ? '📝 ' : '📷 ') + e.tag + ' · ' + e.time;
       var state = document.createElement('span');
       state.className = 'state ' + e.state;
       state.textContent = e.state === 'ok' ? '已上傳' : e.state === 'pending' ? '排隊中' : '失敗,等重試';
@@ -890,10 +922,10 @@
             .then(function (res) {
               if (res.ok) {
                 return queueDelete(item.id).then(function () {
-                  pushLog({ tag: item.tag, time: item.time, state: 'ok' });
+                  pushLog({ tag: item.tag, time: item.time, state: 'ok', type: item.type });
                 });
               } else {
-                pushLog({ tag: item.tag, time: item.time, state: 'err' });
+                pushLog({ tag: item.tag, time: item.time, state: 'err', type: item.type });
               }
             })
             .catch(function () {
@@ -926,15 +958,55 @@
         mimeType: file.type || 'image/jpeg',
         base64Data: base64Data,
         tag: activeCourse || '未分類',
-        time: stamp
+        time: stamp,
+        type: 'photo'
       };
       queueAdd(item).then(function () {
-        pushLog({ tag: item.tag, time: item.time, state: 'pending' });
+        pushLog({ tag: item.tag, time: item.time, state: 'pending', type: item.type });
         refreshQueueInfo();
         processQueue();
       });
     };
     reader.readAsDataURL(file);
+  });
+
+  // ---------- 課堂筆記 ----------
+  // 打字期間自動存草稿到 localStorage,避免瀏覽器分頁被系統關掉、或不小心切換頁面弄丟還沒存檔的筆記。
+  var NOTE_DRAFT_KEY = 'noteDraft';
+  noteTextarea.value = localStorage.getItem(NOTE_DRAFT_KEY) || '';
+  noteTextarea.addEventListener('input', function () {
+    localStorage.setItem(NOTE_DRAFT_KEY, noteTextarea.value);
+  });
+
+  saveNoteBtn.addEventListener('click', function () {
+    var text = noteTextarea.value;
+    if (!text.trim()) { toast('筆記是空的'); return; }
+    if (!activeCourse) { toast('請先選課程'); return; }
+
+    var blob = new Blob([text], { type: 'text/plain' });
+    var reader = new FileReader();
+    reader.onload = function () {
+      var base64Data = reader.result.split(',')[1];
+      var now = new Date();
+      var stamp = now.toLocaleString('zh-TW', { hour12: false });
+      var item = {
+        filename: 'note_' + now.getTime() + '.txt',
+        mimeType: 'text/plain',
+        base64Data: base64Data,
+        tag: activeCourse,
+        time: stamp,
+        type: 'note'
+      };
+      queueAdd(item).then(function () {
+        noteTextarea.value = '';
+        localStorage.removeItem(NOTE_DRAFT_KEY);
+        pushLog({ tag: item.tag, time: item.time, state: 'pending', type: item.type });
+        refreshQueueInfo();
+        processQueue();
+        toast('筆記已存,排隊上傳中');
+      });
+    };
+    reader.readAsDataURL(blob);
   });
 
   // ---------- 連線狀態 ----------
@@ -958,6 +1030,7 @@
   updateShootEnabled();
   updateNetInfo();
   refreshQueueInfo();
+  renderNoteCourseLabel();
   refreshCourses();
   refreshPendingCleanup();
   processQueue();

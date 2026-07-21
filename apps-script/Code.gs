@@ -294,7 +294,8 @@ function getFilesForCourse(courseName, props) {
  *   action: 'addCourse'     → PWA 新增課程用。Body: { passKey, action, courseName }
  *   action: 'removeCourse'  → PWA 刪除課程用。Body: { passKey, action, courseName }
  *   action: 'dismissCleanup'→ PWA 確認已手動清理 Drive 用。Body: { passKey, action, courseName }
- *   (無 action)             → PWA 拍照上傳用。Body: { passKey, filename, mimeType, base64Data, tag }
+ *   (無 action)             → PWA 拍照/筆記上傳用。Body: { passKey, filename, mimeType, base64Data, tag, type }
+ *                              type 是 'photo'(預設,拍照)或 'note'(課堂筆記,存成 .txt)
  */
 function doPost(e) {
   const props = PropertiesService.getScriptProperties();
@@ -345,8 +346,9 @@ function doPost(e) {
 
     const bytes = Utilities.base64Decode(body.base64Data);
     const blob = Utilities.newBlob(bytes, body.mimeType || 'application/octet-stream', body.filename);
+    const uploadType = body.type === 'note' ? 'note' : 'photo'; // 目前 PWA 只會傳這兩種,其他值一律當拍照處理
 
-    const result = fileIntoLibrary(blob, 'photo', body.tag || '未分類', 'PWA');
+    const result = fileIntoLibrary(blob, uploadType, body.tag || '未分類', 'PWA');
     return jsonResponse({ ok: true, url: result.url, name: result.name });
   } catch (err) {
     return jsonResponse({ ok: false, error: String(err) });
@@ -497,7 +499,7 @@ function normalizeTag(tag, props) {
 
 // ============ 共用歸檔邏輯 ============
 
-const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', doc: '文件' };
+const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', note: '筆記', doc: '文件' };
 
 /**
  * 如果這個標籤(忽略大小寫)還沒登記在課程清單裡,自動加進去。
@@ -676,16 +678,16 @@ function reconcileIndex() {
       const courseName = normalizeTag(courseFolder.getName(), props);
       let courseHasFiles = false;
 
-      const files = collectFilesRecursive(courseFolder);
-      for (let j = 0; j < files.length; j++) {
-        const file = files[j];
+      const entries = collectFilesWithType(courseFolder, null);
+      for (let j = 0; j < entries.length; j++) {
+        const file = entries[j].file;
         courseHasFiles = true;
         const id = file.getId();
         actualIds[id] = true;
         if (!indexById[id]) {
           newRows.push([
             file.getDateCreated(),
-            inferTypeFolderName(file.getMimeType()),
+            entries[j].type || inferTypeFolderName(file.getMimeType()),
             courseName,
             file.getName(),
             file.getUrl(),
@@ -729,20 +731,27 @@ function reconcileIndex() {
 }
 
 /**
- * 遞迴收集 folder 底下(含各層子資料夾)所有「未被丟進垃圾桶」的檔案,回傳 File 陣列。
+ * 遞迴收集 folder 底下(含各層子資料夾)所有「未被丟進垃圾桶」的檔案,回傳 { file, type } 陣列。
+ * type 判斷方式:走訪路徑上只要經過一個名稱剛好是「照片/錄音/筆記/文件」(TYPE_FOLDER_NAME 的值)
+ * 的資料夾,就記住這個名稱當作類型,比對純猜 MIME 更準(例如筆記是純文字檔,MIME 猜不出來是筆記
+ * 還是一般文件,但只要它躺在「筆記」資料夾底下,就照資料夾說的算)。找不到已知類型資料夾時,
+ * type 是 null,由呼叫端退回用 inferTypeFolderName() 猜 MIME。
  */
-function collectFilesRecursive(folder) {
+function collectFilesWithType(folder, inheritedType) {
+  const knownTypeNames = Object.keys(TYPE_FOLDER_NAME).map(function (k) { return TYPE_FOLDER_NAME[k]; });
+  const type = knownTypeNames.indexOf(folder.getName()) !== -1 ? folder.getName() : inheritedType;
+
   const out = [];
   const files = folder.getFiles();
   while (files.hasNext()) {
     const f = files.next();
-    if (!f.isTrashed()) out.push(f);
+    if (!f.isTrashed()) out.push({ file: f, type: type });
   }
   const subs = folder.getFolders();
   while (subs.hasNext()) {
     const sub = subs.next();
     if (sub.isTrashed()) continue;
-    const nested = collectFilesRecursive(sub);
+    const nested = collectFilesWithType(sub, type);
     for (let i = 0; i < nested.length; i++) out.push(nested[i]);
   }
   return out;
