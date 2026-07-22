@@ -223,6 +223,7 @@ function extractFileId(url) {
  *   ?action=courses&passKey=xxx              → 回傳課程標籤清單 (PWA 開啟時抓取,需帶金鑰)
  *   ?action=pendingCleanup&passKey=xxx       → 回傳「已從清單刪除但 Drive 資料夾還在」的待清理提醒
  *   ?action=listFiles&course=X&passKey=xxx   → 回傳某課程底下所有照片/錄音/筆記清單
+ *   ?action=podcastJobStatus&passKey=xxx     → 回傳目前 Podcast 背景下載工作的進度(見 startPodcastJob())
  *   (無參數)                                 → 健康檢查,瀏覽器打開網址確認服務正常
  */
 function doGet(e) {
@@ -263,6 +264,27 @@ function doGet(e) {
     return jsonResponse({ ok: true, files: files });
   }
 
+  if (action === 'podcastJobStatus') {
+    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+      return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
+    const job = getPodcastJob(props);
+    if (!job) return jsonResponse({ ok: true, job: null });
+    return jsonResponse({
+      ok: true,
+      job: {
+        status: job.status,
+        tag: job.tag,
+        episodeTitle: job.episodeTitle,
+        offset: job.offset,
+        totalSize: job.totalSize,
+        error: job.error,
+        resultUrl: job.resultUrl,
+        resultName: job.resultName
+      }
+    });
+  }
+
   return jsonResponse({ ok: true, message: '隨時資料庫 API 運作中' });
 }
 
@@ -301,8 +323,10 @@ function getFilesForCourse(courseName, props) {
  *                              Google 文件,才能在 Drive 裡點開就正常顯示螢光筆/標題格式,不用
  *                              自己另外做檢視器(Drive 內建預覽不會執行 .html 檔案裡的格式)。
  *   action: 'archivePodcast'→ PWA 貼 Apple Podcasts 網址歸檔用。Body: { passKey, action, courseName, appleUrl }
- *                              後端自己解析 collection ID、查 RSS Feed、比對集數標題、下載音檔,
- *                              見 archivePodcastEpisode()。只支援 Apple Podcasts 格式的網址。
+ *                              後端自己解析 collection ID、查 RSS Feed、比對集數標題,馬上回應「已啟動」,
+ *                              實際下載音檔、上傳 Drive 交給背景工作分好幾次接力完成(見 startPodcastJob()/
+ *                              processPodcastJob()),不受單次執行 6 分鐘上限限制。PWA 用 doGet 的
+ *                              podcastJobStatus 這個 action 輪詢進度。只支援 Apple Podcasts 格式的網址。
  *   (無 action)             → PWA 拍照/錄音檔上傳用。Body: { passKey, filename, mimeType, base64Data, tag, type }
  *                              type 是 'photo'(預設,拍照)或 'audio'(其他裝置錄的音檔;也相容
  *                              舊版課堂筆記用過的 'note',只是新版筆記都改走 saveNote 這個 action 了)。
@@ -722,7 +746,32 @@ function updateIndexRowTime(sheet, url, now) {
   }
 }
 
-// ============ Podcast 歸檔(貼 Apple Podcasts 網址,自動下載這一集音檔)============
+// ============ Podcast 歸檔(貼 Apple Podcasts 網址,背景分段下載+上傳,不受單次執行 6 分鐘上限限制)============
+//
+// 整體流程:
+//   1. handleArchivePodcast()/startPodcastJob() 在使用者按下「封存」的這次請求裡,同步做完
+//      「查 collection ID → iTunes Lookup 拿 RSS Feed → 抓集數標題 → 比對 RSS 找音檔網址」
+//      這幾個很快的小型 API 呼叫,並啟動一個 Google Drive 分段上傳(resumable upload)工作階段,
+//      把工作進度存進 PropertiesService 的 PODCAST_JOB,馬上回應「已啟動背景下載」,不等下載完成。
+//   2. 排一個一次性觸發器呼叫 processPodcastJob(),用 downloadAndUploadNextChunk() 一段一段跟
+//      來源要 HTTP Range 分段內容、直接 PUT 上傳到 Drive 的分段上傳工作階段(不在記憶體裡拼接整個
+//      音檔),每次執行只做時間預算內能做的量,做不完就在結尾排下一個一次性觸發器接力繼續。
+//   3. 全部上傳完後 finalizePodcastJob() 短暫上鎖寫入索引表一列,工作結束。
+//
+// 這樣設計是因為 Apps Script 對「單次執行」(不管是網頁請求還是排程觸發)都有 6 分鐘上限,
+// 之前整段下載+歸檔塞在同一次請求裡處理,長集數很容易頂到這個上限而失敗、且失敗時完全沒有
+// 進度可言;拆成背景接力後,單次執行只需處理一小段,同時邊下載邊上傳也不再需要把整個音檔
+// 放進記憶體,兩個既有的殘留限制(執行時間、記憶體)一起解決。
+//
+// 已知限制:只認 Apple Podcasts 網址;極少數情況標題比對不到會回傳錯誤,不會抓錯集數;
+// 同時間只支援一個背景工作(符合這個專案單一自足腳本、不做過度設計的風格),工作卡住超過
+// 10 分鐘沒更新視為異常中止,允許重新開始;整個下載超過 3 小時視為異常,強制中止不會無限重試。
+
+const PODCAST_CHUNK_SIZE = 8 * 1024 * 1024; // 8MB,是 256KiB 的整數倍,符合 Drive 分段上傳對非最後一段長度的規則
+const PODCAST_JOB_PROP = 'PODCAST_JOB';
+const PODCAST_TICK_BUDGET_MS = 4.5 * 60 * 1000; // 每次背景執行的工作預算,留餘裕不去頂到 Apps Script 6 分鐘上限
+const PODCAST_JOB_STALE_MS = 10 * 60 * 1000; // 工作進度超過這麼久沒更新,視為卡住/異常中止,允許重新開始新的一集
+const PODCAST_JOB_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 從頭到尾超過這個時間強制中止,避免異常狀況下無限接力下去
 
 function handleArchivePodcast(body, props) {
   const tag = String(body.courseName || '').trim();
@@ -733,32 +782,30 @@ function handleArchivePodcast(body, props) {
   if (!appleUrl) {
     return jsonResponse({ ok: false, error: '缺少 Podcast 網址' });
   }
+
+  const existing = getPodcastJob(props);
+  if (existing && (existing.status === 'downloading' || existing.status === 'finalizing')) {
+    const age = Date.now() - new Date(existing.updatedAt).getTime();
+    if (age < PODCAST_JOB_STALE_MS) {
+      return jsonResponse({ ok: false, error: '已經有一集(「' + existing.episodeTitle + '」)正在背景下載,請等它完成或失敗後再試' });
+    }
+    // 卡住太久了,視為已經異常中止,允許蓋掉重新開始一個新的工作
+  }
+
   try {
-    const result = archivePodcastEpisode(appleUrl, tag, props);
-    return jsonResponse({ ok: true, url: result.url, name: result.name, title: result.title });
+    const job = startPodcastJob(appleUrl, tag, props);
+    return jsonResponse({ ok: true, started: true, title: job.episodeTitle });
   } catch (err) {
     return jsonResponse({ ok: false, error: String(err.message || err) });
   }
 }
 
 /**
- * 從 Apple Podcasts 集數分享連結,自動抓這一集的音檔下載歸檔。只支援 Apple Podcasts
- * 格式的網址(podcasts.apple.com/.../id<數字>?i=<數字>)。整體流程(已經用真實網址驗證過):
- *   1. 從網址解析出節目的 collection ID,呼叫 Apple 官方公開 API(iTunes Lookup,免金鑰)
- *      拿到這個節目真正的 RSS Feed 網址
- *   2. 直接抓使用者貼的網址本身(原始 HTML),讀 <meta property="og:title"> 拿到這一集
- *      完整、未截斷的標題——這個標題會跟 RSS Feed 裡對應 <item><title> 逐字相同
- *   3. 抓 RSS Feed,用 XmlService 解析,找出標題完全吻合的 <item>,取出 <enclosure url>
- *      屬性,這才是真正可下載的音檔網址
- *   4. 用 downloadInChunks() 分段下載音檔本體,走 fileIntoLibrary() 一般歸檔邏輯存進
- *      Drive、寫索引表
- *
- * 已知限制:只認 Apple Podcasts 網址;極少數情況標題比對不到會回傳錯誤,不會抓錯集數;
- * 來源網站如果不支援分段下載(見 downloadInChunks() 說明)還是可能受限於 Apps Script
- * 對單次下載內容大小的隱性上限,但實測過的兩個真實節目(不同主機商)都支援分段下載,
- * 目前沒遇過真的不支援的案例。
+ * 解析集數、決定歸檔位置、啟動 Drive 分段上傳工作階段,把工作進度存下來,並排一個馬上執行的
+ * 一次性觸發器開始背景下載。這幾步都很快(幾個小型 API 呼叫),所以留在請求本身同步做;
+ * 真正耗時的音檔下載/上傳交給 processPodcastJob() 分好幾次背景執行完成。
  */
-function archivePodcastEpisode(appleUrl, tag, props) {
+function startPodcastJob(appleUrl, tag, props) {
   const collectionId = extractApplePodcastCollectionId(appleUrl);
   if (!collectionId) {
     throw new Error('看不出這是 Apple Podcasts 的集數網址,請確認貼的是完整的分享連結');
@@ -795,96 +842,249 @@ function archivePodcastEpisode(appleUrl, tag, props) {
     throw new Error('在節目的 RSS 清單裡找不到「' + episodeTitle + '」這一集,可能標題有出入或集數已下架');
   }
 
-  // 4. 分段下載音檔本體(繞過 Apps Script 對單次下載內容大小的隱性上限,見 downloadInChunks())
-  const blob = downloadInChunks(audioUrl, PODCAST_CHUNK_SIZE);
-  const extMatch = audioUrl.match(/\.(mp3|m4a|wav|aac)(\?|$)/i);
-  blob.setName('episode.' + (extMatch ? extMatch[1].toLowerCase() : 'mp3'));
+  // 4. 決定歸檔位置跟檔名(跟 fileIntoLibrary() 的規則一致),啟動 Drive 分段上傳工作階段
+  const safeTag = String(tag || '未分類').replace(/[\\\/:*?"<>|]/g, '') || '未分類';
+  registerCourseIfNew(safeTag, props);
+  const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
+  const now = new Date();
+  const yyyy = Utilities.formatDate(now, 'Asia/Taipei', 'yyyy');
+  const mm = Utilities.formatDate(now, 'Asia/Taipei', 'MM');
+  const courseFolder = getOrCreateFolder(root, safeTag);
+  const yearFolder = getOrCreateFolder(courseFolder, yyyy);
+  const monthFolder = getOrCreateFolder(yearFolder, mm);
+  const typeFolder = getOrCreateFolder(monthFolder, TYPE_FOLDER_NAME.podcast);
 
-  // 5. 歸檔(這一步才真的動到 Drive/索引表,短暫上鎖)
+  const extMatch = audioUrl.match(/\.(mp3|m4a|wav|aac)(\?|$)/i);
+  const ext = extMatch ? extMatch[1].toLowerCase() : 'mp3';
+  const mimeType = { mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac' }[ext] || 'audio/mpeg';
+  const stamp = Utilities.formatDate(now, 'Asia/Taipei', 'yyyyMMdd_HHmm');
+  const fileName = TYPE_FOLDER_NAME.podcast + '_' + stamp + '_' + safeTag + '.' + ext;
+
+  const uploadUrl = initDriveResumableUpload(fileName, mimeType, typeFolder.getId());
+
+  const job = {
+    status: 'downloading',
+    tag: safeTag,
+    episodeTitle: episodeTitle,
+    audioUrl: audioUrl,
+    contentType: mimeType,
+    fileName: fileName,
+    uploadUrl: uploadUrl,
+    offset: 0,
+    totalSize: null,
+    driveFileId: null,
+    error: null,
+    resultUrl: null,
+    resultName: null,
+    startedAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  };
+  savePodcastJob(job, props);
+
+  ScriptApp.newTrigger('processPodcastJob').timeBased().after(1000).create();
+
+  return job;
+}
+
+function getPodcastJob(props) {
+  const raw = props.getProperty(PODCAST_JOB_PROP);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function savePodcastJob(job, props) {
+  job.updatedAt = new Date().toISOString();
+  props.setProperty(PODCAST_JOB_PROP, JSON.stringify(job));
+}
+
+/**
+ * 啟動一個 Google Drive 分段上傳工作階段(Drive API v3 resumable upload),順便直接指定
+ * 檔名/mimeType/所在資料夾,回傳這個工作階段的網址。之後每下載到一段音檔,就直接 PUT 去
+ * 這個網址,不用等全部下載完才一次寫進 Drive——這樣才能讓下載/上傳工作跨好幾次 Apps Script
+ * 執行接力完成,同時每次執行都只需要在記憶體裡撐住一小段內容,不用拼出整個音檔。
+ * 因為啟動時就指定了 parents,完成後檔案已經在正確的課程/年/月/Podcast 資料夾裡,
+ * 不用歸檔後再搬動。
+ */
+function initDriveResumableUpload(fileName, mimeType, parentFolderId) {
+  const resp = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+    method: 'post',
+    contentType: 'application/json; charset=UTF-8',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    payload: JSON.stringify({ name: fileName, mimeType: mimeType, parents: [parentFolderId] }),
+    muteHttpExceptions: true
+  });
+  if (resp.getResponseCode() !== 200) {
+    throw new Error('無法啟動 Drive 分段上傳工作階段(HTTP ' + resp.getResponseCode() + ')');
+  }
+  const headers = resp.getHeaders();
+  const uploadUrl = headers['Location'] || headers['location'];
+  if (!uploadUrl) {
+    throw new Error('Drive 沒有回傳分段上傳工作階段網址');
+  }
+  return uploadUrl;
+}
+
+/**
+ * 由一次性觸發器呼叫(見 startPodcastJob() 結尾/本函式結尾)。每次執行處理一段時間預算內能做的
+ * 分段下載+上傳,做不完就在結尾排下一個一次性觸發器接力繼續,直到整個檔案處理完或失敗為止。
+ * 用「一次性觸發器接力」而不是固定週期排程,是為了避免同一個工作被兩個重疊的執行同時處理
+ * (固定週期排程如果上一次還沒跑完、下一次時間就到了,Apps Script 會兩個一起跑,狀態會撞在一起);
+ * 一次性觸發器觸發完會自動被 Apps Script 移除,不用手動清。
+ */
+function processPodcastJob() {
+  const props = PropertiesService.getScriptProperties();
+  const job = getPodcastJob(props);
+  if (!job) return; // 沒有工作在進行
+
+  if (job.status === 'finalizing') {
+    // 上一次接力卡在寫索引表那一步(通常是搶鎖失敗),直接重試
+    finalizePodcastJob(job, props);
+    return;
+  }
+  if (job.status !== 'downloading') return; // 已經 done/error,沒有事要做
+
+  const startedAgo = Date.now() - new Date(job.startedAt).getTime();
+  if (startedAgo > PODCAST_JOB_MAX_AGE_MS) {
+    job.status = 'error';
+    job.error = '下載耗時超過安全上限(3 小時),已中止,請重新試一次';
+    savePodcastJob(job, props);
+    return;
+  }
+
+  const tickStart = Date.now();
+  try {
+    while (Date.now() - tickStart < PODCAST_TICK_BUDGET_MS) {
+      const done = downloadAndUploadNextChunk(job);
+      savePodcastJob(job, props);
+      if (done) {
+        finalizePodcastJob(job, props);
+        return;
+      }
+    }
+  } catch (err) {
+    job.status = 'error';
+    job.error = String(err.message || err);
+    savePodcastJob(job, props);
+    return;
+  }
+
+  // 這次執行的時間預算用完了,還沒下載完,排下一次接力繼續
+  ScriptApp.newTrigger('processPodcastJob').timeBased().after(3000).create();
+}
+
+/**
+ * 處理一段(用 job.offset 記錄的位置繼續):跟來源要一段 HTTP Range,成功就直接 PUT 給
+ * uploadChunkToDrive() 上傳到 Drive,更新 job.offset/job.totalSize。回傳 true 代表整個
+ * 檔案已經處理完。
+ *
+ * 沿用先前單次下載版本的核心邏輯:用回應的 Content-Range 標頭取得真正總長度(不依賴來源
+ * 自己宣告的、不一定可靠的長度欄位);伺服器不支援分段下載時直接把拿到的完整內容當一段處理。
+ * 跟先前版本不同的地方:截斷檢查從「容許 2% 誤差」收緊成「非最後一段必須剛好等於預期長度」,
+ * 因為 Drive 分段上傳要求非最後一段的長度得是 256KiB 的整數倍,不能有零頭。
+ */
+function downloadAndUploadNextChunk(job) {
+  const chunkEnd = job.offset + PODCAST_CHUNK_SIZE - 1;
+  const rangeEnd = job.totalSize === null ? chunkEnd : Math.min(chunkEnd, job.totalSize - 1);
+
+  const resp = UrlFetchApp.fetch(job.audioUrl, {
+    headers: { Range: 'bytes=' + job.offset + '-' + rangeEnd },
+    muteHttpExceptions: true
+  });
+  const code = resp.getResponseCode();
+
+  if (code === 200 && job.offset === 0) {
+    // 來源不支援分段下載,直接給了完整內容,一次上傳完成
+    const bytes = resp.getContent();
+    job.totalSize = bytes.length;
+    uploadChunkToDrive(job, bytes, 0, bytes.length - 1, true);
+    job.offset = bytes.length;
+    return true;
+  }
+  if (code !== 206) {
+    throw new Error('下載失敗(HTTP ' + code + '),來源網址可能已經失效');
+  }
+
+  const headers = resp.getHeaders();
+  const contentRange = headers['Content-Range'] || headers['content-range'];
+  const totalMatch = contentRange && String(contentRange).match(/\/(\d+)\s*$/);
+  if (!totalMatch) {
+    throw new Error('讀不到檔案總長度,無法確認下載進度');
+  }
+  if (job.totalSize === null) job.totalSize = parseInt(totalMatch[1], 10);
+
+  const bytes = resp.getContent();
+  const expectedLen = rangeEnd - job.offset + 1;
+  const isFinal = job.offset + bytes.length >= job.totalSize;
+  if (!isFinal && bytes.length !== expectedLen) {
+    throw new Error(
+      '分段下載時有一段沒抓完整(從第 ' + job.offset + ' bytes 開始那段,預期 ' + expectedLen +
+      ' bytes,實際拿到 ' + bytes.length + ' bytes),可能是網路不穩,請重新試一次'
+    );
+  }
+
+  uploadChunkToDrive(job, bytes, job.offset, job.offset + bytes.length - 1, isFinal);
+  job.offset += bytes.length;
+  return job.offset >= job.totalSize;
+}
+
+/**
+ * 把一段內容 PUT 進 Drive 分段上傳工作階段。中間段落 Drive 會回 308(繼續),最後一段
+ * (byteEnd+1 等於檔案總長度)Drive 會回 200/201,並在回應內容裡給這個新檔案的 id——
+ * 這個 id 就是最後歸檔要用的檔案,存進 job.driveFileId。
+ */
+function uploadChunkToDrive(job, bytes, byteStart, byteEnd, isFinal) {
+  const resp = UrlFetchApp.fetch(job.uploadUrl, {
+    method: 'put',
+    contentType: job.contentType,
+    headers: {
+      Authorization: 'Bearer ' + ScriptApp.getOAuthToken(),
+      'Content-Range': 'bytes ' + byteStart + '-' + byteEnd + '/' + job.totalSize
+    },
+    payload: Utilities.newBlob(bytes),
+    muteHttpExceptions: true
+  });
+  const code = resp.getResponseCode();
+  if (isFinal) {
+    if (code !== 200 && code !== 201) {
+      throw new Error('上傳到 Drive 失敗(HTTP ' + code + ')');
+    }
+    const fileData = JSON.parse(resp.getContentText());
+    job.driveFileId = fileData.id;
+  } else if (code !== 308) {
+    throw new Error('上傳到 Drive 這一段失敗(HTTP ' + code + ')');
+  }
+}
+
+/**
+ * 整個音檔上傳完成後,寫進索引表一列(短暫上鎖,只保護這個寫入動作,比照 fileIntoLibrary()/
+ * reconcileIndex() 的既有慣例),完成後把工作狀態設成 done。拿不到鎖不會放棄這個工作,
+ * 排一個一次性觸發器稍後重試(processPodcastJob() 開頭看到 status 是 finalizing 會直接
+ * 重跑這個函式)。
+ */
+function finalizePodcastJob(job, props) {
+  job.status = 'finalizing';
+  savePodcastJob(job, props);
+
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(10000);
   } catch (err) {
-    throw new Error('伺服器忙碌中,請稍後再試');
+    ScriptApp.newTrigger('processPodcastJob').timeBased().after(5000).create();
+    return;
   }
   try {
-    const result = fileIntoLibrary(blob, 'podcast', tag, 'Podcast', episodeTitle);
-    return { url: result.url, name: result.name, title: episodeTitle };
+    const file = DriveApp.getFileById(job.driveFileId);
+    const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+    sheet.appendRow([new Date(), TYPE_FOLDER_NAME.podcast, job.tag, job.fileName, file.getUrl(), 'Podcast', job.episodeTitle]);
+    job.status = 'done';
+    job.resultUrl = file.getUrl();
+    job.resultName = job.fileName;
+  } catch (err) {
+    job.status = 'error';
+    job.error = '下載完成但寫入索引表失敗:' + String(err.message || err);
   } finally {
     lock.releaseLock();
+    savePodcastJob(job, props);
   }
-}
-
-const PODCAST_CHUNK_SIZE = 8 * 1024 * 1024; // 8MB,保守值,留足夠餘裕不去頂到 Apps Script 隱性上限
-
-/**
- * 用 HTTP Range 請求分段下載一個檔案,繞過 Apps Script 對單次 UrlFetchApp 回應內容大小
- * 的隱性上限。實測發現超過上限時的行為是「安靜截斷」——HTTP 狀態碼還是 200、不會丟例外,
- * 但內容只有一部分,所以不能只看狀態碼判斷成功與否,才需要這個函式取代單次下載。
- *
- * 運作方式:
- *   - 第一段用 Range: bytes=0-{chunkSize-1} 去要,伺服器如果支援分段下載,會回
- *     206 Partial Content,連同 Content-Range: bytes 0-X/總長度 這個標頭一起回來,
- *     從這裡才知道檔案真正的總長度(不依賴來源自己宣告的、不一定可靠的長度欄位)
- *   - 如果伺服器不支援分段下載,直接會回 200 跟完整內容,這時就不用再繼續分段,
- *     直接把這次拿到的內容當作全部(極少數老舊/簡陋的檔案主機才會這樣)
- *   - 每一段下載完都會檢查這一段有沒有抓到預期的長度,兜不起來立刻判定失敗、不會拼出
- *     一個內容不完整的檔案
- *   - 全部分段抓齊之後,在記憶體裡拼成一個完整的 blob
- *
- * 已知限制:最後拼接的步驟還是要把整個檔案內容放進記憶體,超級長的集數(3 小時以上、
- * 200MB+ 等級)還是有機會頂到 Apps Script 本身的記憶體或執行時間上限,只是門檻比
- * 「一次下載整個檔案」大幅提高,不是完全沒有上限了。
- */
-function downloadInChunks(url, chunkSize) {
-  let offset = 0;
-  let totalSize = null;
-  let contentType = null;
-  const parts = [];
-
-  while (totalSize === null || offset < totalSize) {
-    const end = offset + chunkSize - 1;
-    const rangeEnd = totalSize === null ? end : Math.min(end, totalSize - 1);
-
-    const resp = UrlFetchApp.fetch(url, {
-      headers: { Range: 'bytes=' + offset + '-' + rangeEnd },
-      muteHttpExceptions: true
-    });
-    const code = resp.getResponseCode();
-
-    if (code === 200 && offset === 0) {
-      // 伺服器不支援分段下載,直接給了完整內容,一次到位不用再分段
-      return resp.getBlob();
-    }
-    if (code !== 206) {
-      throw new Error('分段下載失敗(HTTP ' + code + '),來源網址可能已經失效');
-    }
-
-    const headers = resp.getHeaders();
-    if (!contentType) contentType = headers['Content-Type'] || headers['content-type'] || 'audio/mpeg';
-
-    const contentRange = headers['Content-Range'] || headers['content-range'];
-    const totalMatch = contentRange && String(contentRange).match(/\/(\d+)\s*$/);
-    if (!totalMatch) {
-      throw new Error('讀不到檔案總長度,無法確認分段下載進度');
-    }
-    if (totalSize === null) totalSize = parseInt(totalMatch[1], 10);
-
-    const chunkBytes = resp.getContent();
-    const expectedChunkLen = rangeEnd - offset + 1;
-    if (chunkBytes.length < expectedChunkLen * 0.98) {
-      throw new Error(
-        '分段下載時有一段沒抓完整(從第 ' + offset + ' bytes 開始那段,預期 ' + expectedChunkLen +
-        ' bytes,實際只拿到 ' + chunkBytes.length + ' bytes),可能是網路不穩,建議重試'
-      );
-    }
-
-    parts.push(chunkBytes);
-    offset += chunkBytes.length;
-  }
-
-  const combined = [].concat.apply([], parts);
-  return Utilities.newBlob(combined, contentType || 'audio/mpeg', 'download');
 }
 
 function extractApplePodcastCollectionId(url) {

@@ -118,6 +118,15 @@
     cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
   .archive-podcast-btn:disabled { opacity: .5; }
+
+  .podcast-progress-title { font-size: 13px; margin-bottom: 8px; }
+  .podcast-progress-bar {
+    height: 8px; border-radius: 4px; background: #0f172a; border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .podcast-progress-fill { height: 100%; background: var(--accent); transition: width .4s ease; }
+  .podcast-progress-pct { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
   .note-toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
   .note-tool-btn {
     flex: 1; padding: 7px 6px; border-radius: 8px; border: 1px solid var(--border);
@@ -309,11 +318,19 @@
 <div class="card">
   <h2>Podcast 歸檔</h2>
   <div class="course-label" id="podcastCourseLabel">目前課程:—</div>
-  <div class="podcast-input-row">
-    <input type="text" id="podcastUrlInput" placeholder="貼 Apple Podcasts 集數分享連結…" disabled>
-    <button class="archive-podcast-btn" id="archivePodcastBtn" disabled>封存</button>
+  <div id="podcastForm">
+    <div class="podcast-input-row">
+      <input type="text" id="podcastUrlInput" placeholder="貼 Apple Podcasts 集數分享連結…" disabled>
+      <button class="archive-podcast-btn" id="archivePodcastBtn" disabled>封存</button>
+    </div>
+    <p class="hint-text">只支援 <b>Apple Podcasts</b> 格式的網址(在 Podcasts App 分享某一集拿到的連結)。按下封存後會在背景下載這一集的音檔存進目前課程的資料夾,可以直接離開這頁或關螢幕,回來就看得到最新進度。</p>
   </div>
-  <p class="hint-text">只支援 <b>Apple Podcasts</b> 格式的網址(在 Podcasts App 分享某一集拿到的連結)。會自動下載這一集的音檔,存進目前課程的資料夾。長集數(1.5~3 小時等級)可能因為檔案太大或下載太久而失敗。</p>
+  <div id="podcastProgress" hidden>
+    <div class="podcast-progress-title">背景下載中:「<span id="podcastProgressTitle"></span>」</div>
+    <div class="podcast-progress-bar"><div class="podcast-progress-fill" id="podcastProgressFill" style="width:5%"></div></div>
+    <div class="podcast-progress-pct" id="podcastProgressPct">準備中…</div>
+    <p class="hint-text">可以離開這頁或關閉螢幕,下載會在背景繼續,回來就看得到最新進度。</p>
+  </div>
 </div>
 
 <div class="card">
@@ -470,6 +487,11 @@
   var podcastCourseLabelEl = document.getElementById('podcastCourseLabel');
   var podcastUrlInput = document.getElementById('podcastUrlInput');
   var archivePodcastBtn = document.getElementById('archivePodcastBtn');
+  var podcastFormEl = document.getElementById('podcastForm');
+  var podcastProgressEl = document.getElementById('podcastProgress');
+  var podcastProgressTitleEl = document.getElementById('podcastProgressTitle');
+  var podcastProgressFillEl = document.getElementById('podcastProgressFill');
+  var podcastProgressPctEl = document.getElementById('podcastProgressPct');
 
   var activeCourse = localStorage.getItem('activeCourse') || '';
   var recentLog = [];
@@ -1183,6 +1205,70 @@
   // 跟拍照/筆記不同,這個操作整個都在伺服器端進行(後端自己查 RSS、下載音檔),使用者
   // 這邊只送一段網址字串出去,所以不走離線佇列——失敗了網址還在輸入框裡,直接重按「封存」
   // 重試就好,不用像拍照/筆記那樣擔心「當下產生的內容不排隊儲存就會弄丟」。
+  //
+  // 實際下載/上傳在後端是背景分段接力完成的(不受 Apps Script 單次執行 6 分鐘上限限制,
+  // 詳見 Code.gs 的 startPodcastJob()/processPodcastJob()),所以這裡按下「封存」只是
+  // 「啟動」背景工作,馬上就會拿到回應;之後用 podcastJobStatus 這個 action 輪詢進度,
+  // 用進度區塊取代原本輸入框的位置,工作結束(成功或失敗)才切回一般表單。
+  var podcastPollTimer = null;
+
+  function showPodcastForm() {
+    podcastFormEl.hidden = false;
+    podcastProgressEl.hidden = true;
+  }
+
+  function showPodcastProgress(job) {
+    podcastFormEl.hidden = true;
+    podcastProgressEl.hidden = false;
+    podcastProgressTitleEl.textContent = job.episodeTitle || '';
+    if (job.totalSize) {
+      var pct = Math.min(100, Math.round((job.offset / job.totalSize) * 100));
+      podcastProgressFillEl.style.width = pct + '%';
+      podcastProgressPctEl.textContent = pct + '%(' + (job.offset / 1024 / 1024).toFixed(0) + 'MB / ' + (job.totalSize / 1024 / 1024).toFixed(0) + 'MB)';
+    } else {
+      podcastProgressFillEl.style.width = '5%';
+      podcastProgressPctEl.textContent = '準備中…';
+    }
+  }
+
+  function startPodcastPolling() {
+    if (podcastPollTimer) return;
+    podcastPollTimer = setInterval(function () { checkPodcastJob(true); }, 8000);
+  }
+
+  function stopPodcastPolling() {
+    if (podcastPollTimer) { clearInterval(podcastPollTimer); podcastPollTimer = null; }
+  }
+
+  // showToastOnFinish:工作剛結束時要不要跳 toast 通知結果。App 剛開啟時的檢查傳 false,
+  // 避免每次重開 App 都被通知「上次那份工作」的結果;由輪詢迴圈呼叫時傳 true。
+  function checkPodcastJob(showToastOnFinish) {
+    if (!isConfigured()) return;
+    fetch(settings.gasUrl + '?action=podcastJobStatus&passKey=' + encodeURIComponent(settings.passKey))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.ok || !data.job) {
+          showPodcastForm();
+          stopPodcastPolling();
+          return;
+        }
+        var job = data.job;
+        if (job.status === 'downloading' || job.status === 'finalizing') {
+          showPodcastProgress(job);
+          startPodcastPolling();
+        } else if (job.status === 'done') {
+          showPodcastForm();
+          stopPodcastPolling();
+          if (showToastOnFinish) toast('已封存:「' + job.episodeTitle + '」');
+        } else if (job.status === 'error') {
+          showPodcastForm();
+          stopPodcastPolling();
+          if (showToastOnFinish) toast('封存失敗:' + (job.error || '未知錯誤'));
+        }
+      })
+      .catch(function () { /* 背景輪詢失敗不用特別提示,下一輪再試 */ });
+  }
+
   archivePodcastBtn.addEventListener('click', function () {
     var url = podcastUrlInput.value.trim();
     if (!url) { toast('請先貼上 Podcast 集數網址'); return; }
@@ -1192,8 +1278,7 @@
       return;
     }
 
-    var originalLabel = archivePodcastBtn.textContent;
-    archivePodcastBtn.textContent = '封存中…';
+    archivePodcastBtn.textContent = '啟動中…';
     archivePodcastBtn.disabled = true;
 
     fetch(settings.gasUrl, {
@@ -1203,22 +1288,23 @@
     })
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        archivePodcastBtn.textContent = originalLabel;
+        archivePodcastBtn.textContent = '封存';
         archivePodcastBtn.disabled = false;
         if (data.ok) {
           podcastUrlInput.value = '';
-          toast('已封存:「' + data.title + '」');
+          toast('已開始背景下載:「' + data.title + '」');
+          checkPodcastJob(true);
         } else {
           toast('封存失敗:' + (data.error || '未知錯誤'));
         }
       })
       .catch(function () {
-        archivePodcastBtn.textContent = originalLabel;
+        archivePodcastBtn.textContent = '封存';
         archivePodcastBtn.disabled = false;
         if (!navigator.onLine) {
           toast('離線中,無法連線,請連網後再試');
         } else {
-          toast('封存失敗,可能是這集太長、伺服器處理超過 6 分鐘上限被中斷,並非離線問題,可稍後再試一次');
+          toast('封存失敗,請稍後再試');
         }
       });
   });
@@ -1533,9 +1619,13 @@
   window.addEventListener('offline', updateNetInfo);
   setInterval(processQueue, 20000);
 
-  // 從其他 App 切回來(或分頁重新可見)時,背景自動同步一次 Drive 變更
+  // 從其他 App 切回來(或分頁重新可見)時,背景自動同步一次 Drive 變更,順便看一下
+  // Podcast 背景下載工作有沒有進度(不跳 toast,只是刷新畫面上的進度條)
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') autoSync();
+    if (document.visibilityState === 'visible') {
+      autoSync();
+      checkPodcastJob(false);
+    }
   });
 
   // ---------- 啟動 ----------
@@ -1547,6 +1637,7 @@
   refreshPendingCleanup();
   processQueue();
   autoSync(); // 打開 App 時背景對帳一次,讓瀏覽反映 Drive 最新內容
+  checkPodcastJob(false); // 如果重開 App 時剛好有 Podcast 背景工作還在跑,自動接上顯示進度
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').catch(function () {});
