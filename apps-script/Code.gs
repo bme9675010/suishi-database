@@ -750,13 +750,13 @@ function handleArchivePodcast(body, props) {
  *      完整、未截斷的標題——這個標題會跟 RSS Feed 裡對應 <item><title> 逐字相同
  *   3. 抓 RSS Feed,用 XmlService 解析,找出標題完全吻合的 <item>,取出 <enclosure url>
  *      屬性,這才是真正可下載的音檔網址
- *   4. 下載音檔本體,比對 RSS <enclosure length> 宣告的檔案大小,確認完整下載後才走
- *      fileIntoLibrary() 一般歸檔邏輯存進 Drive、寫索引表
+ *   4. 用 downloadInChunks() 分段下載音檔本體,走 fileIntoLibrary() 一般歸檔邏輯存進
+ *      Drive、寫索引表
  *
- * 已知限制:只認 Apple Podcasts 網址;很長的集數(60~150 分鐘等級)可能因為 UrlFetchApp
- * 對單次下載內容大小有隱性上限而失敗——實際觀察到的行為是「安靜截斷」(HTTP 狀態碼仍是
- * 200、不會丟例外,但內容不完整),所以額外做了大小比對主動抓這種情況,寧可判定失敗、
- * 不歸檔,也不要把截斷的檔案當成功存進去;極少數情況標題比對不到會回傳錯誤,不會抓錯集數。
+ * 已知限制:只認 Apple Podcasts 網址;極少數情況標題比對不到會回傳錯誤,不會抓錯集數;
+ * 來源網站如果不支援分段下載(見 downloadInChunks() 說明)還是可能受限於 Apps Script
+ * 對單次下載內容大小的隱性上限,但實測過的兩個真實節目(不同主機商)都支援分段下載,
+ * 目前沒遇過真的不支援的案例。
  */
 function archivePodcastEpisode(appleUrl, tag, props) {
   const collectionId = extractApplePodcastCollectionId(appleUrl);
@@ -780,22 +780,14 @@ function archivePodcastEpisode(appleUrl, tag, props) {
   }
   const episodeTitle = decodeHtmlEntities(titleMatch[1]);
 
-  // 3. 抓 RSS Feed,找標題完全吻合的那一集,取出音檔網址跟宣告的檔案大小
+  // 3. 抓 RSS Feed,找標題完全吻合的那一集,取出音檔網址
   const feedResp = UrlFetchApp.fetch(feedUrl, { muteHttpExceptions: true });
   const items = XmlService.parse(feedResp.getContentText()).getRootElement().getChild('channel').getChildren('item');
   let audioUrl = null;
-  let expectedBytes = null; // RSS <enclosure length="..."> 宣告的檔案大小(bytes),沒有就是 null
   for (let i = 0; i < items.length; i++) {
     if (items[i].getChildText('title') === episodeTitle) {
       const enclosure = items[i].getChild('enclosure');
-      if (enclosure) {
-        audioUrl = enclosure.getAttribute('url').getValue();
-        const lengthAttr = enclosure.getAttribute('length');
-        if (lengthAttr) {
-          const parsed = parseInt(lengthAttr.getValue(), 10);
-          if (parsed > 0) expectedBytes = parsed;
-        }
-      }
+      if (enclosure) audioUrl = enclosure.getAttribute('url').getValue();
       break;
     }
   }
@@ -803,25 +795,8 @@ function archivePodcastEpisode(appleUrl, tag, props) {
     throw new Error('在節目的 RSS 清單裡找不到「' + episodeTitle + '」這一集,可能標題有出入或集數已下架');
   }
 
-  // 4. 下載音檔本體
-  const audioResp = UrlFetchApp.fetch(audioUrl, { muteHttpExceptions: true });
-  if (audioResp.getResponseCode() !== 200) {
-    throw new Error('音檔下載失敗(HTTP ' + audioResp.getResponseCode() + '),可能檔案太大或來源網址失效');
-  }
-  const blob = audioResp.getBlob();
-  const actualBytes = blob.getBytes().length;
-
-  // Apps Script 對單次下載內容大小有隱性上限,超過時觀察到的行為是「安靜截斷」——
-  // HTTP 狀態碼還是 200,不會丟例外,但實際內容不完整。靠 RSS 宣告的檔案大小主動比對,
-  // 抓到的位元組數明顯少於宣告值就視為下載不完整,直接判定失敗,不要把壞掉的檔案存進去。
-  if (expectedBytes && actualBytes < expectedBytes * 0.98) {
-    throw new Error(
-      '下載不完整:這一集完整大小約 ' + Math.round(expectedBytes / 1024 / 1024) + 'MB,' +
-      '但只抓到 ' + Math.round(actualBytes / 1024 / 1024) + 'MB 就被截斷了,' +
-      '可能是集數太長,超過系統單次下載的容量上限,沒有辦法解決,建議改用其他方式取得這一集的音檔'
-    );
-  }
-
+  // 4. 分段下載音檔本體(繞過 Apps Script 對單次下載內容大小的隱性上限,見 downloadInChunks())
+  const blob = downloadInChunks(audioUrl, PODCAST_CHUNK_SIZE);
   const extMatch = audioUrl.match(/\.(mp3|m4a|wav|aac)(\?|$)/i);
   blob.setName('episode.' + (extMatch ? extMatch[1].toLowerCase() : 'mp3'));
 
@@ -838,6 +813,78 @@ function archivePodcastEpisode(appleUrl, tag, props) {
   } finally {
     lock.releaseLock();
   }
+}
+
+const PODCAST_CHUNK_SIZE = 8 * 1024 * 1024; // 8MB,保守值,留足夠餘裕不去頂到 Apps Script 隱性上限
+
+/**
+ * 用 HTTP Range 請求分段下載一個檔案,繞過 Apps Script 對單次 UrlFetchApp 回應內容大小
+ * 的隱性上限。實測發現超過上限時的行為是「安靜截斷」——HTTP 狀態碼還是 200、不會丟例外,
+ * 但內容只有一部分,所以不能只看狀態碼判斷成功與否,才需要這個函式取代單次下載。
+ *
+ * 運作方式:
+ *   - 第一段用 Range: bytes=0-{chunkSize-1} 去要,伺服器如果支援分段下載,會回
+ *     206 Partial Content,連同 Content-Range: bytes 0-X/總長度 這個標頭一起回來,
+ *     從這裡才知道檔案真正的總長度(不依賴來源自己宣告的、不一定可靠的長度欄位)
+ *   - 如果伺服器不支援分段下載,直接會回 200 跟完整內容,這時就不用再繼續分段,
+ *     直接把這次拿到的內容當作全部(極少數老舊/簡陋的檔案主機才會這樣)
+ *   - 每一段下載完都會檢查這一段有沒有抓到預期的長度,兜不起來立刻判定失敗、不會拼出
+ *     一個內容不完整的檔案
+ *   - 全部分段抓齊之後,在記憶體裡拼成一個完整的 blob
+ *
+ * 已知限制:最後拼接的步驟還是要把整個檔案內容放進記憶體,超級長的集數(3 小時以上、
+ * 200MB+ 等級)還是有機會頂到 Apps Script 本身的記憶體或執行時間上限,只是門檻比
+ * 「一次下載整個檔案」大幅提高,不是完全沒有上限了。
+ */
+function downloadInChunks(url, chunkSize) {
+  let offset = 0;
+  let totalSize = null;
+  let contentType = null;
+  const parts = [];
+
+  while (totalSize === null || offset < totalSize) {
+    const end = offset + chunkSize - 1;
+    const rangeEnd = totalSize === null ? end : Math.min(end, totalSize - 1);
+
+    const resp = UrlFetchApp.fetch(url, {
+      headers: { Range: 'bytes=' + offset + '-' + rangeEnd },
+      muteHttpExceptions: true
+    });
+    const code = resp.getResponseCode();
+
+    if (code === 200 && offset === 0) {
+      // 伺服器不支援分段下載,直接給了完整內容,一次到位不用再分段
+      return resp.getBlob();
+    }
+    if (code !== 206) {
+      throw new Error('分段下載失敗(HTTP ' + code + '),來源網址可能已經失效');
+    }
+
+    const headers = resp.getHeaders();
+    if (!contentType) contentType = headers['Content-Type'] || headers['content-type'] || 'audio/mpeg';
+
+    const contentRange = headers['Content-Range'] || headers['content-range'];
+    const totalMatch = contentRange && String(contentRange).match(/\/(\d+)\s*$/);
+    if (!totalMatch) {
+      throw new Error('讀不到檔案總長度,無法確認分段下載進度');
+    }
+    if (totalSize === null) totalSize = parseInt(totalMatch[1], 10);
+
+    const chunkBytes = resp.getContent();
+    const expectedChunkLen = rangeEnd - offset + 1;
+    if (chunkBytes.length < expectedChunkLen * 0.98) {
+      throw new Error(
+        '分段下載時有一段沒抓完整(從第 ' + offset + ' bytes 開始那段,預期 ' + expectedChunkLen +
+        ' bytes,實際只拿到 ' + chunkBytes.length + ' bytes),可能是網路不穩,建議重試'
+      );
+    }
+
+    parts.push(chunkBytes);
+    offset += chunkBytes.length;
+  }
+
+  const combined = [].concat.apply([], parts);
+  return Utilities.newBlob(combined, contentType || 'audio/mpeg', 'download');
 }
 
 function extractApplePodcastCollectionId(url) {
