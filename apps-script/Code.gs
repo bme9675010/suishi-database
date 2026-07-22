@@ -750,10 +750,13 @@ function handleArchivePodcast(body, props) {
  *      完整、未截斷的標題——這個標題會跟 RSS Feed 裡對應 <item><title> 逐字相同
  *   3. 抓 RSS Feed,用 XmlService 解析,找出標題完全吻合的 <item>,取出 <enclosure url>
  *      屬性,這才是真正可下載的音檔網址
- *   4. 下載音檔本體,走 fileIntoLibrary() 一般歸檔邏輯存進 Drive、寫索引表
+ *   4. 下載音檔本體,比對 RSS <enclosure length> 宣告的檔案大小,確認完整下載後才走
+ *      fileIntoLibrary() 一般歸檔邏輯存進 Drive、寫索引表
  *
  * 已知限制:只認 Apple Podcasts 網址;很長的集數(60~150 分鐘等級)可能因為 UrlFetchApp
- * 回應內容大小上限或執行時間上限而失敗;極少數情況標題比對不到會回傳錯誤,不會抓錯集數。
+ * 對單次下載內容大小有隱性上限而失敗——實際觀察到的行為是「安靜截斷」(HTTP 狀態碼仍是
+ * 200、不會丟例外,但內容不完整),所以額外做了大小比對主動抓這種情況,寧可判定失敗、
+ * 不歸檔,也不要把截斷的檔案當成功存進去;極少數情況標題比對不到會回傳錯誤,不會抓錯集數。
  */
 function archivePodcastEpisode(appleUrl, tag, props) {
   const collectionId = extractApplePodcastCollectionId(appleUrl);
@@ -777,14 +780,22 @@ function archivePodcastEpisode(appleUrl, tag, props) {
   }
   const episodeTitle = decodeHtmlEntities(titleMatch[1]);
 
-  // 3. 抓 RSS Feed,找標題完全吻合的那一集,取出音檔網址
+  // 3. 抓 RSS Feed,找標題完全吻合的那一集,取出音檔網址跟宣告的檔案大小
   const feedResp = UrlFetchApp.fetch(feedUrl, { muteHttpExceptions: true });
   const items = XmlService.parse(feedResp.getContentText()).getRootElement().getChild('channel').getChildren('item');
   let audioUrl = null;
+  let expectedBytes = null; // RSS <enclosure length="..."> 宣告的檔案大小(bytes),沒有就是 null
   for (let i = 0; i < items.length; i++) {
     if (items[i].getChildText('title') === episodeTitle) {
       const enclosure = items[i].getChild('enclosure');
-      if (enclosure) audioUrl = enclosure.getAttribute('url').getValue();
+      if (enclosure) {
+        audioUrl = enclosure.getAttribute('url').getValue();
+        const lengthAttr = enclosure.getAttribute('length');
+        if (lengthAttr) {
+          const parsed = parseInt(lengthAttr.getValue(), 10);
+          if (parsed > 0) expectedBytes = parsed;
+        }
+      }
       break;
     }
   }
@@ -798,6 +809,19 @@ function archivePodcastEpisode(appleUrl, tag, props) {
     throw new Error('音檔下載失敗(HTTP ' + audioResp.getResponseCode() + '),可能檔案太大或來源網址失效');
   }
   const blob = audioResp.getBlob();
+  const actualBytes = blob.getBytes().length;
+
+  // Apps Script 對單次下載內容大小有隱性上限,超過時觀察到的行為是「安靜截斷」——
+  // HTTP 狀態碼還是 200,不會丟例外,但實際內容不完整。靠 RSS 宣告的檔案大小主動比對,
+  // 抓到的位元組數明顯少於宣告值就視為下載不完整,直接判定失敗,不要把壞掉的檔案存進去。
+  if (expectedBytes && actualBytes < expectedBytes * 0.98) {
+    throw new Error(
+      '下載不完整:這一集完整大小約 ' + Math.round(expectedBytes / 1024 / 1024) + 'MB,' +
+      '但只抓到 ' + Math.round(actualBytes / 1024 / 1024) + 'MB 就被截斷了,' +
+      '可能是集數太長,超過系統單次下載的容量上限,沒有辦法解決,建議改用其他方式取得這一集的音檔'
+    );
+  }
+
   const extMatch = audioUrl.match(/\.(mp3|m4a|wav|aac)(\?|$)/i);
   blob.setName('episode.' + (extMatch ? extMatch[1].toLowerCase() : 'mp3'));
 
