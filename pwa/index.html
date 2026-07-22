@@ -1215,7 +1215,11 @@
       .catch(function () {
         archivePodcastBtn.textContent = originalLabel;
         archivePodcastBtn.disabled = false;
-        toast('離線中,無法連線,請連網後再試');
+        if (!navigator.onLine) {
+          toast('離線中,無法連線,請連網後再試');
+        } else {
+          toast('封存失敗,可能是這集太長、伺服器處理超過 6 分鐘上限被中斷,並非離線問題,可稍後再試一次');
+        }
       });
   });
 
