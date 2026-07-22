@@ -274,7 +274,7 @@ function getFilesForCourse(courseName, props) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
 
-  const data = sheet.getRange(2, 1, lastRow - 1, 5).getValues(); // 時間,類型,課程標籤,檔名,Drive連結
+  const data = sheet.getRange(2, 1, lastRow - 1, 7).getValues(); // 時間,類型,課程標籤,檔名,Drive連結,來源,備註
   const lower = courseName.toLowerCase();
   const results = [];
 
@@ -282,7 +282,7 @@ function getFilesForCourse(courseName, props) {
     const row = data[i];
     if (String(row[2]).toLowerCase() !== lower) continue;
     const time = row[0] instanceof Date ? row[0].toISOString() : String(row[0]);
-    results.push({ time: time, type: row[1], filename: row[3], url: row[4] });
+    results.push({ time: time, type: row[1], filename: row[3], url: row[4], note: row[6] || '' });
   }
 
   results.sort(function (a, b) { return new Date(b.time) - new Date(a.time); });
@@ -300,6 +300,9 @@ function getFilesForCourse(courseName, props) {
  *                              (見 handleSaveNote() 開頭註解),不是 HTML 字串——直接存成原生
  *                              Google 文件,才能在 Drive 裡點開就正常顯示螢光筆/標題格式,不用
  *                              自己另外做檢視器(Drive 內建預覽不會執行 .html 檔案裡的格式)。
+ *   action: 'archivePodcast'→ PWA 貼 Apple Podcasts 網址歸檔用。Body: { passKey, action, courseName, appleUrl }
+ *                              後端自己解析 collection ID、查 RSS Feed、比對集數標題、下載音檔,
+ *                              見 archivePodcastEpisode()。只支援 Apple Podcasts 格式的網址。
  *   (無 action)             → PWA 拍照/錄音檔上傳用。Body: { passKey, filename, mimeType, base64Data, tag, type }
  *                              type 是 'photo'(預設,拍照)或 'audio'(其他裝置錄的音檔;也相容
  *                              舊版課堂筆記用過的 'note',只是新版筆記都改走 saveNote 這個 action 了)。
@@ -330,6 +333,13 @@ function doPost(e) {
     } catch (err) {
       return jsonResponse({ ok: false, error: String(err) });
     }
+  }
+
+  // archivePodcast 也獨立處理,不佔共用鎖:過程要打好幾次外部網路請求(iTunes API、
+  // Apple 網頁、RSS Feed、音檔本體),可能要幾秒到十幾秒,不該卡住同時間的其他操作。
+  // 真正動到 Drive/索引表的最後一步,archivePodcastEpisode() 內部自己短暫上鎖。
+  if (body.action === 'archivePodcast') {
+    return handleArchivePodcast(body, props);
   }
 
   const lock = LockService.getScriptLock();
@@ -541,7 +551,7 @@ function normalizeTag(tag, props) {
 
 // ============ 共用歸檔邏輯 ============
 
-const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', note: '筆記', doc: '文件' };
+const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', note: '筆記', podcast: 'Podcast', doc: '文件' };
 
 /**
  * 如果這個標籤(忽略大小寫)還沒登記在課程清單裡,自動加進去。
@@ -561,8 +571,11 @@ function registerCourseIfNew(tag, props) {
 
 /**
  * 把一個 blob 歸檔到 隨時資料庫/課程/年/月/類型/,改成統一命名規則,並寫入索引表一列。
+ * note 是可選的補充說明(目前只有 Podcast 歸檔會用到,存這一集的完整標題),寫進索引表
+ * 本來就有、但一直沒用到的「備註」欄,不影響檔名規則(檔名還是統一格式,不會因為標題
+ * 很長或含特殊字元跑掉)。
  */
-function fileIntoLibrary(blob, type, tag, source) {
+function fileIntoLibrary(blob, type, tag, source, note) {
   const props = PropertiesService.getScriptProperties();
   const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
   const now = new Date();
@@ -587,7 +600,7 @@ function fileIntoLibrary(blob, type, tag, source) {
   const file = typeFolder.createFile(blob);
 
   const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
-  sheet.appendRow([now, typeFolderName, safeTag, newName, file.getUrl(), source, '']);
+  sheet.appendRow([now, typeFolderName, safeTag, newName, file.getUrl(), source, note || '']);
 
   return { url: file.getUrl(), name: newName };
 }
@@ -707,6 +720,114 @@ function updateIndexRowTime(sheet, url, now) {
       return;
     }
   }
+}
+
+// ============ Podcast 歸檔(貼 Apple Podcasts 網址,自動下載這一集音檔)============
+
+function handleArchivePodcast(body, props) {
+  const tag = String(body.courseName || '').trim();
+  if (!tag) {
+    return jsonResponse({ ok: false, error: '缺少課程名稱' });
+  }
+  const appleUrl = String(body.appleUrl || '').trim();
+  if (!appleUrl) {
+    return jsonResponse({ ok: false, error: '缺少 Podcast 網址' });
+  }
+  try {
+    const result = archivePodcastEpisode(appleUrl, tag, props);
+    return jsonResponse({ ok: true, url: result.url, name: result.name, title: result.title });
+  } catch (err) {
+    return jsonResponse({ ok: false, error: String(err.message || err) });
+  }
+}
+
+/**
+ * 從 Apple Podcasts 集數分享連結,自動抓這一集的音檔下載歸檔。只支援 Apple Podcasts
+ * 格式的網址(podcasts.apple.com/.../id<數字>?i=<數字>)。整體流程(已經用真實網址驗證過):
+ *   1. 從網址解析出節目的 collection ID,呼叫 Apple 官方公開 API(iTunes Lookup,免金鑰)
+ *      拿到這個節目真正的 RSS Feed 網址
+ *   2. 直接抓使用者貼的網址本身(原始 HTML),讀 <meta property="og:title"> 拿到這一集
+ *      完整、未截斷的標題——這個標題會跟 RSS Feed 裡對應 <item><title> 逐字相同
+ *   3. 抓 RSS Feed,用 XmlService 解析,找出標題完全吻合的 <item>,取出 <enclosure url>
+ *      屬性,這才是真正可下載的音檔網址
+ *   4. 下載音檔本體,走 fileIntoLibrary() 一般歸檔邏輯存進 Drive、寫索引表
+ *
+ * 已知限制:只認 Apple Podcasts 網址;很長的集數(60~150 分鐘等級)可能因為 UrlFetchApp
+ * 回應內容大小上限或執行時間上限而失敗;極少數情況標題比對不到會回傳錯誤,不會抓錯集數。
+ */
+function archivePodcastEpisode(appleUrl, tag, props) {
+  const collectionId = extractApplePodcastCollectionId(appleUrl);
+  if (!collectionId) {
+    throw new Error('看不出這是 Apple Podcasts 的集數網址,請確認貼的是完整的分享連結');
+  }
+
+  // 1. 查節目的 RSS Feed 網址
+  const lookupResp = UrlFetchApp.fetch('https://itunes.apple.com/lookup?id=' + collectionId, { muteHttpExceptions: true });
+  const lookupData = JSON.parse(lookupResp.getContentText());
+  const feedUrl = lookupData.results && lookupData.results[0] && lookupData.results[0].feedUrl;
+  if (!feedUrl) {
+    throw new Error('在 Apple Podcasts 資料庫裡找不到這個節目的 RSS Feed');
+  }
+
+  // 2. 抓這一集在 Apple Podcasts 頁面上的完整標題,用來比對 RSS 裡是哪一集
+  const pageResp = UrlFetchApp.fetch(appleUrl, { muteHttpExceptions: true });
+  const titleMatch = pageResp.getContentText().match(/<meta property="og:title" content="([^"]+)"/);
+  if (!titleMatch) {
+    throw new Error('讀不到這一集的標題,請確認網址是有效的集數分享連結(不是節目首頁)');
+  }
+  const episodeTitle = decodeHtmlEntities(titleMatch[1]);
+
+  // 3. 抓 RSS Feed,找標題完全吻合的那一集,取出音檔網址
+  const feedResp = UrlFetchApp.fetch(feedUrl, { muteHttpExceptions: true });
+  const items = XmlService.parse(feedResp.getContentText()).getRootElement().getChild('channel').getChildren('item');
+  let audioUrl = null;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].getChildText('title') === episodeTitle) {
+      const enclosure = items[i].getChild('enclosure');
+      if (enclosure) audioUrl = enclosure.getAttribute('url').getValue();
+      break;
+    }
+  }
+  if (!audioUrl) {
+    throw new Error('在節目的 RSS 清單裡找不到「' + episodeTitle + '」這一集,可能標題有出入或集數已下架');
+  }
+
+  // 4. 下載音檔本體
+  const audioResp = UrlFetchApp.fetch(audioUrl, { muteHttpExceptions: true });
+  if (audioResp.getResponseCode() !== 200) {
+    throw new Error('音檔下載失敗(HTTP ' + audioResp.getResponseCode() + '),可能檔案太大或來源網址失效');
+  }
+  const blob = audioResp.getBlob();
+  const extMatch = audioUrl.match(/\.(mp3|m4a|wav|aac)(\?|$)/i);
+  blob.setName('episode.' + (extMatch ? extMatch[1].toLowerCase() : 'mp3'));
+
+  // 5. 歸檔(這一步才真的動到 Drive/索引表,短暫上鎖)
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (err) {
+    throw new Error('伺服器忙碌中,請稍後再試');
+  }
+  try {
+    const result = fileIntoLibrary(blob, 'podcast', tag, 'Podcast', episodeTitle);
+    return { url: result.url, name: result.name, title: episodeTitle };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function extractApplePodcastCollectionId(url) {
+  const m = String(url).match(/\/id(\d+)/);
+  return m ? m[1] : null;
+}
+
+function decodeHtmlEntities(text) {
+  return String(text)
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
 }
 
 // ============ 一次性搬移工具(舊結構 年/月/類型 → 新結構 課程/年/月/類型) ============

@@ -105,6 +105,19 @@
 
   .course-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
   .hint-text { font-size: 11px; color: var(--muted); margin: 8px 0 0; line-height: 1.5; }
+
+  .podcast-input-row { display: flex; gap: 8px; }
+  .podcast-input-row input {
+    flex: 1; min-width: 0; padding: 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: #0f172a; color: var(--text); font-size: 14px;
+  }
+  .podcast-input-row input:disabled { opacity: .5; }
+  .archive-podcast-btn {
+    flex-shrink: 0; padding: 10px 16px; border-radius: 8px; border: none;
+    background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 700;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .archive-podcast-btn:disabled { opacity: .5; }
   .note-toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
   .note-tool-btn {
     flex: 1; padding: 7px 6px; border-radius: 8px; border: 1px solid var(--border);
@@ -294,6 +307,16 @@
 </div>
 
 <div class="card">
+  <h2>Podcast 歸檔</h2>
+  <div class="course-label" id="podcastCourseLabel">目前課程:—</div>
+  <div class="podcast-input-row">
+    <input type="text" id="podcastUrlInput" placeholder="貼 Apple Podcasts 集數分享連結…" disabled>
+    <button class="archive-podcast-btn" id="archivePodcastBtn" disabled>封存</button>
+  </div>
+  <p class="hint-text">只支援 <b>Apple Podcasts</b> 格式的網址(在 Podcasts App 分享某一集拿到的連結)。會自動下載這一集的音檔,存進目前課程的資料夾。長集數(1.5~3 小時等級)可能因為檔案太大或下載太久而失敗。</p>
+</div>
+
+<div class="card">
   <h2>課堂筆記</h2>
   <div class="course-label" id="noteCourseLabel">目前課程:—</div>
   <div class="note-toolbar">
@@ -444,6 +467,9 @@
   var uploadAudioBtn = document.getElementById('uploadAudioBtn');
   var audioFileInput = document.getElementById('audioFileInput');
   var audioCourseLabelEl = document.getElementById('audioCourseLabel');
+  var podcastCourseLabelEl = document.getElementById('podcastCourseLabel');
+  var podcastUrlInput = document.getElementById('podcastUrlInput');
+  var archivePodcastBtn = document.getElementById('archivePodcastBtn');
 
   var activeCourse = localStorage.getItem('activeCourse') || '';
   var recentLog = [];
@@ -678,7 +704,7 @@
 
   function renderBrowseCourseList(files) {
     if (!files || files.length === 0) {
-      browseCourseListEl.innerHTML = '<li class="empty">這門課還沒有任何照片、錄音或筆記</li>';
+      browseCourseListEl.innerHTML = '<li class="empty">這門課還沒有任何照片、錄音、筆記或 Podcast</li>';
       return;
     }
     browseCourseListEl.innerHTML = '';
@@ -693,11 +719,13 @@
 
       var icon = document.createElement('span');
       icon.className = 'browse-icon';
-      icon.textContent = f.type === '照片' ? '📷' : (f.type === '錄音' ? '🎙️' : (f.type === '筆記' ? '📝' : '📄'));
+      icon.textContent = f.type === '照片' ? '📷' : (f.type === '錄音' ? '🎙️' : (f.type === '筆記' ? '📝' : (f.type === 'Podcast' ? '🎧' : '📄')));
 
       var name = document.createElement('span');
       name.className = 'browse-name';
-      name.textContent = f.filename;
+      // 有備註(目前只有 Podcast 歸檔會存,是這一集的完整標題)就顯示備註,比檔名(統一的
+      // Podcast_時間戳_課程.mp3 格式)更看得出是哪一集,沒有備註就照舊顯示檔名。
+      name.textContent = f.note || f.filename;
 
       var time = document.createElement('span');
       time.className = 'browse-time';
@@ -836,6 +864,7 @@
     var text = '目前課程:' + (activeCourse || '—');
     noteCourseLabelEl.textContent = text;
     audioCourseLabelEl.textContent = text;
+    podcastCourseLabelEl.textContent = text;
     loadNoteDraft();
   }
 
@@ -932,6 +961,8 @@
     noteEditor.contentEditable = isConfigured() ? 'true' : 'false';
     saveNoteBtn.disabled = !isConfigured();
     uploadAudioBtn.disabled = !isConfigured();
+    podcastUrlInput.disabled = !isConfigured();
+    archivePodcastBtn.disabled = !isConfigured();
     insertTimeBtn.disabled = !isConfigured();
     boldBtn.disabled = !isConfigured();
     italicBtn.disabled = !isConfigured();
@@ -1146,6 +1177,46 @@
       });
     };
     reader.readAsDataURL(file);
+  });
+
+  // ---------- Podcast 歸檔(貼 Apple Podcasts 網址)----------
+  // 跟拍照/筆記不同,這個操作整個都在伺服器端進行(後端自己查 RSS、下載音檔),使用者
+  // 這邊只送一段網址字串出去,所以不走離線佇列——失敗了網址還在輸入框裡,直接重按「封存」
+  // 重試就好,不用像拍照/筆記那樣擔心「當下產生的內容不排隊儲存就會弄丟」。
+  archivePodcastBtn.addEventListener('click', function () {
+    var url = podcastUrlInput.value.trim();
+    if (!url) { toast('請先貼上 Podcast 集數網址'); return; }
+    if (!activeCourse) { toast('請先選課程'); return; }
+    if (url.indexOf('podcasts.apple.com') === -1) {
+      toast('目前只支援 Apple Podcasts 格式的網址');
+      return;
+    }
+
+    var originalLabel = archivePodcastBtn.textContent;
+    archivePodcastBtn.textContent = '封存中…';
+    archivePodcastBtn.disabled = true;
+
+    fetch(settings.gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ passKey: settings.passKey, action: 'archivePodcast', courseName: activeCourse, appleUrl: url })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        archivePodcastBtn.textContent = originalLabel;
+        archivePodcastBtn.disabled = false;
+        if (data.ok) {
+          podcastUrlInput.value = '';
+          toast('已封存:「' + data.title + '」');
+        } else {
+          toast('封存失敗:' + (data.error || '未知錯誤'));
+        }
+      })
+      .catch(function () {
+        archivePodcastBtn.textContent = originalLabel;
+        archivePodcastBtn.disabled = false;
+        toast('離線中,無法連線,請連網後再試');
+      });
   });
 
   // ---------- 課堂筆記 ----------
