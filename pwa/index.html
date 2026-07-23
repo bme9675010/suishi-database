@@ -279,6 +279,13 @@
     width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
     background: #0f172a; color: var(--text); font-size: 14px;
   }
+  .passkey-row { display: flex; gap: 8px; }
+  .passkey-row input { flex: 1; min-width: 0; }
+  .passkey-row button {
+    flex-shrink: 0; width: 40px; border-radius: 8px; border: 1px solid var(--border);
+    background: #0f172a; color: var(--muted); font-size: 16px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
   .dialog-actions { display: flex; gap: 8px; margin-top: 16px; }
   .dialog-actions button {
     flex: 1; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
@@ -418,7 +425,10 @@
     <label for="gasUrlInput">Apps Script 網址 (GAS_URL)</label>
     <input id="gasUrlInput" placeholder="https://script.google.com/macros/s/xxx/exec">
     <label for="passKeyInput">通行金鑰 (PASS_KEY)</label>
-    <input id="passKeyInput" placeholder="setup() 執行紀錄裡的那串">
+    <div class="passkey-row">
+      <input type="password" id="passKeyInput" placeholder="setup() 執行紀錄裡的那串">
+      <button type="button" id="togglePassKey" title="顯示/隱藏">👁</button>
+    </div>
     <div class="dialog-actions">
       <button id="cancelSettings">取消</button>
       <button class="primary" id="saveSettings">儲存</button>
@@ -578,9 +588,16 @@
   // ---------- 設定視窗 ----------
   document.getElementById('openSettings').addEventListener('click', function () {
     document.getElementById('gasUrlInput').value = settings.gasUrl;
-    document.getElementById('passKeyInput').value = settings.passKey;
+    var passKeyInput = document.getElementById('passKeyInput');
+    passKeyInput.value = settings.passKey;
+    passKeyInput.type = 'password'; // 每次打開都重設成遮蔽狀態,不要記住上次「顯示」的選擇
     renderSyncStatus();
     settingsDialog.showModal();
+  });
+  // 通行金鑰預設用密碼欄位遮蔽(不想被路過瞄到或截圖時外流),點一下眼睛圖示可以暫時顯示
+  document.getElementById('togglePassKey').addEventListener('click', function () {
+    var passKeyInput = document.getElementById('passKeyInput');
+    passKeyInput.type = passKeyInput.type === 'password' ? 'text' : 'password';
   });
   document.getElementById('syncNowBtn').addEventListener('click', function () {
     runSync({ manual: true, force: true });
