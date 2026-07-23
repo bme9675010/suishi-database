@@ -1228,7 +1228,12 @@
       name.textContent = (e.type === 'note' ? '📝 ' : (e.type === 'audio' ? '🎙️ ' : '📷 ')) + e.tag + ' · ' + e.time;
       var state = document.createElement('span');
       state.className = 'state ' + e.state;
-      state.textContent = e.state === 'ok' ? '已上傳' : e.state === 'pending' ? '排隊中' : '失敗,等重試';
+      state.textContent = e.state === 'ok' ? '已上傳' : e.state === 'pending' ? '排隊中' : '失敗,等重試(點我看原因)';
+      if (e.state === 'err' && e.error) {
+        state.style.cursor = 'pointer';
+        state.title = e.error;
+        state.addEventListener('click', function () { toast(e.error); });
+      }
       li.appendChild(name);
       li.appendChild(state);
       logListEl.appendChild(li);
@@ -1258,7 +1263,9 @@
                   pushLog({ tag: item.tag, time: item.time, state: 'ok', type: item.type });
                 });
               } else {
-                pushLog({ tag: item.tag, time: item.time, state: 'err', type: item.type });
+                // 帶上後端回傳的實際錯誤原因,不然畫面上永遠只看得到「失敗」兩個字,
+                // 沒辦法知道是哪裡出問題(見 renderLog() 的點擊顯示)。
+                pushLog({ tag: item.tag, time: item.time, state: 'err', type: item.type, error: res.error || '未知錯誤' });
               }
             })
             .catch(function () {
