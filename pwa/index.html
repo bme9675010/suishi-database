@@ -64,6 +64,12 @@
   .course-recent .course-list { margin-bottom: 0; }
 
   .course-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  #courseList { max-height: 260px; overflow-y: auto; padding-right: 2px; } /* 課程一多時,主選單卡片本身不會無限長高,超過就內部捲動 */
+  .course-category-label {
+    flex-basis: 100%; font-size: 11px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .03em; margin: 10px 0 2px;
+  }
+  .course-category-label:first-child { margin-top: 0; }
   .course-chip {
     border: 1px solid var(--border); background: transparent; color: var(--text);
     padding: 8px 14px; border-radius: 999px; font-size: 14px;
@@ -76,7 +82,7 @@
 
   .cleanup-card { border-color: #fbbf24; }
   .cleanup-card h2 { color: #fbbf24; }
-  ul.cleanup-list { list-style: none; margin: 0; padding: 0; }
+  ul.cleanup-list { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
   ul.cleanup-list li {
     display: flex; justify-content: space-between; align-items: center; gap: 8px;
     padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px;
@@ -1195,7 +1201,26 @@
       courseListEl.innerHTML = '<span class="empty">找不到符合的課程</span>';
       return;
     }
-    filtered.forEach(function (c) { courseListEl.appendChild(makeChip(c)); });
+
+    // 依分類分組(學習 → 工作 → 投資 → 未分類),課程一多時比一長串平鋪好找,
+    // 分組常數跟「管理課程」共用(COURSE_CATEGORY_GROUPS/LABEL)。
+    var groups = {};
+    COURSE_CATEGORY_GROUPS.forEach(function (g) { groups[g] = []; });
+    filtered.forEach(function (c) {
+      var cat = currentCourseCategories[c] || '';
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(c);
+    });
+
+    COURSE_CATEGORY_GROUPS.forEach(function (cat) {
+      var list = groups[cat];
+      if (!list || list.length === 0) return;
+      var label = document.createElement('span');
+      label.className = 'course-category-label';
+      label.textContent = COURSE_CATEGORY_LABEL[cat] || cat;
+      courseListEl.appendChild(label);
+      list.forEach(function (c) { courseListEl.appendChild(makeChip(c)); });
+    });
   }
 
   function renderCourses(courses) {
