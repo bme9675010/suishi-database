@@ -238,6 +238,7 @@ function extractFileId(url) {
  *   ?action=courses&passKey=xxx              → 回傳課程標籤清單 + 各課程的分類(PWA 開啟時抓取,需帶金鑰)
  *   ?action=pendingCleanup&passKey=xxx       → 回傳「已從清單刪除但 Drive 資料夾還在」的待清理提醒
  *   ?action=listFiles&course=X&passKey=xxx   → 回傳某課程底下所有照片/錄音/筆記清單
+ *   ?action=searchFiles&q=關鍵字&passKey=xxx  → 跨課程搜尋檔名/備註/課程標籤,回傳結果帶課程標籤
  *   ?action=podcastJobStatus&passKey=xxx     → 回傳目前 Podcast 背景下載工作的進度(見 startPodcastJob())
  *   (無參數)                                 → 健康檢查,瀏覽器打開網址確認服務正常
  */
@@ -277,6 +278,14 @@ function doGet(e) {
       return jsonResponse({ ok: false, error: 'unauthorized' });
     }
     const files = getFilesForCourse(String(e.parameter.course || ''), props);
+    return jsonResponse({ ok: true, files: files });
+  }
+
+  if (action === 'searchFiles') {
+    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+      return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
+    const files = searchFilesAcrossCourses(String(e.parameter.q || ''), props);
     return jsonResponse({ ok: true, files: files });
   }
 
@@ -325,6 +334,42 @@ function getFilesForCourse(courseName, props) {
 
   results.sort(function (a, b) { return new Date(b.time) - new Date(a.time); });
   return results.slice(0, 200);
+}
+
+/**
+ * 跨課程全表搜尋:對索引表每一列的「檔名/備註/課程標籤」三個欄位做不分大小寫的子字串比對,
+ * 回傳格式比 getFilesForCourse() 多一個 tag 欄位——結果橫跨多門課,前端要知道每筆結果
+ * 屬於哪一門課。沒有查詢字串直接回傳空陣列,不做「回傳全部」這種容易誤觸的行為。
+ * 個人使用規模下單次全表掃描是毫秒等級,reconcileIndex() 做的全樹掃描規模更大都沒問題,
+ * 這裡讀取量遠比它小。
+ */
+function searchFilesAcrossCourses(query, props) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return [];
+
+  const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const data = sheet.getRange(2, 1, lastRow - 1, 7).getValues(); // 時間,類型,課程標籤,檔名,Drive連結,來源,備註
+  const results = [];
+
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const tag = String(row[2] || '');
+    const filename = String(row[3] || '');
+    const note = String(row[6] || '');
+    if (
+      tag.toLowerCase().indexOf(q) === -1 &&
+      filename.toLowerCase().indexOf(q) === -1 &&
+      note.toLowerCase().indexOf(q) === -1
+    ) continue;
+    const time = row[0] instanceof Date ? row[0].toISOString() : String(row[0]);
+    results.push({ time: time, type: row[1], tag: tag, filename: filename, url: row[4], note: note });
+  }
+
+  results.sort(function (a, b) { return new Date(b.time) - new Date(a.time); });
+  return results.slice(0, 100);
 }
 
 /**

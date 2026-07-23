@@ -255,6 +255,10 @@
   }
   .browse-icon { flex-shrink: 0; font-size: 16px; }
   .browse-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .browse-tag {
+    flex-shrink: 0; color: var(--accent); font-size: 11px; border: 1px solid var(--accent);
+    border-radius: 999px; padding: 1px 8px;
+  }
   .browse-time { flex-shrink: 0; color: var(--muted); font-size: 11px; }
 
   dialog {
@@ -397,6 +401,8 @@
 <div class="footer-links">
   <button class="settings-link" id="openManageCourses">管理課程</button>
   <span class="footer-dot">·</span>
+  <button class="settings-link" id="openSearch">全域搜尋</button>
+  <span class="footer-dot">·</span>
   <button class="settings-link" id="openSettings">連線設定</button>
 </div>
 
@@ -461,6 +467,25 @@
   </div>
 </dialog>
 
+<dialog id="searchDialog">
+  <div class="dialog-body">
+    <h3>全域搜尋</h3>
+    <input type="text" id="globalSearchInput" placeholder="搜尋所有課程的檔名/標題…">
+    <div class="browse-type-filter" id="searchTypeFilter">
+      <button type="button" class="browse-type-chip active" data-type="">全部</button>
+      <button type="button" class="browse-type-chip" data-type="照片">📷</button>
+      <button type="button" class="browse-type-chip" data-type="錄音">🎙️</button>
+      <button type="button" class="browse-type-chip" data-type="筆記">📝</button>
+      <button type="button" class="browse-type-chip" data-type="Podcast">🎧</button>
+      <button type="button" class="browse-type-chip" data-type="文件">📄</button>
+    </div>
+    <ul class="browse-course-list" id="searchResultList"></ul>
+    <div class="dialog-actions">
+      <button id="closeSearch">關閉</button>
+    </div>
+  </div>
+</dialog>
+
 <div id="toast"></div>
 
 <script>
@@ -497,6 +522,10 @@
   var browseCourseListEl = document.getElementById('browseCourseList');
   var browseSearchInput = document.getElementById('browseSearchInput');
   var browseTypeFilterEl = document.getElementById('browseTypeFilter');
+  var searchDialog = document.getElementById('searchDialog');
+  var globalSearchInput = document.getElementById('globalSearchInput');
+  var searchTypeFilterEl = document.getElementById('searchTypeFilter');
+  var searchResultListEl = document.getElementById('searchResultList');
   var noteEditor = document.getElementById('noteEditor');
   var chapterNavEl = document.getElementById('chapterNav');
   var saveNoteBtn = document.getElementById('saveNoteBtn');
@@ -875,8 +904,12 @@
     renderBrowseCourseList(filtered);
   }
 
-  function renderBrowseCourseList(files) {
-    browseCourseListEl.innerHTML = '';
+  // opts.listEl:要渲染進哪個 <ul>(預設單一課程瀏覽用的 browseCourseListEl);
+  // opts.showTag:結果橫跨多門課時(全域搜尋)多顯示課程標籤,單一課程瀏覽不用、維持原樣。
+  function renderBrowseCourseList(files, opts) {
+    opts = opts || {};
+    var listEl = opts.listEl || browseCourseListEl;
+    listEl.innerHTML = '';
     files.forEach(function (f) {
       var li = document.createElement('li');
       var a = document.createElement('a');
@@ -896,15 +929,23 @@
       // Podcast_時間戳_課程.mp3 格式)更看得出是哪一集,沒有備註就照舊顯示檔名。
       name.textContent = f.note || f.filename;
 
+      a.appendChild(icon);
+      a.appendChild(name);
+
+      if (opts.showTag && f.tag) {
+        var tag = document.createElement('span');
+        tag.className = 'browse-tag';
+        tag.textContent = f.tag;
+        a.appendChild(tag);
+      }
+
       var time = document.createElement('span');
       time.className = 'browse-time';
       time.textContent = formatBrowseTime(f.time);
-
-      a.appendChild(icon);
-      a.appendChild(name);
       a.appendChild(time);
+
       li.appendChild(a);
-      browseCourseListEl.appendChild(li);
+      listEl.appendChild(li);
     });
   }
 
@@ -915,6 +956,81 @@
     } catch (e) {
       return '';
     }
+  }
+
+  // ---------- 全域搜尋(跨課程,不用先選課程)----------
+  // 跟單一課程的瀏覽不同,這裡每次查詢都是後端全表掃描(見 Code.gs 的 searchFilesAcrossCourses()),
+  // 所以打字時用 debounce 延遲送出,不是每敲一個字就打一次 API;類型篩選則是對已經拿到的這批
+  // 結果本地重新渲染,不用再打一次 API,做法跟 applyBrowseFilter() 一致。
+  var currentSearchResults = [];
+  var currentSearchTypeFilter = ''; // 空字串 = 全部
+  var searchDebounceTimer = null;
+
+  document.getElementById('openSearch').addEventListener('click', function () {
+    if (!isConfigured()) { toast('請先填寫連線設定'); return; }
+    globalSearchInput.value = '';
+    currentSearchResults = [];
+    currentSearchTypeFilter = '';
+    Array.prototype.forEach.call(searchTypeFilterEl.children, function (chip) {
+      chip.classList.toggle('active', chip.dataset.type === '');
+    });
+    searchResultListEl.innerHTML = '<li class="empty">輸入關鍵字開始搜尋</li>';
+    searchDialog.showModal();
+    globalSearchInput.focus();
+  });
+  document.getElementById('closeSearch').addEventListener('click', function () {
+    searchDialog.close();
+  });
+
+  globalSearchInput.addEventListener('input', function () {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+    var term = globalSearchInput.value.trim();
+    if (!term) {
+      currentSearchResults = [];
+      searchResultListEl.innerHTML = '<li class="empty">輸入關鍵字開始搜尋</li>';
+      return;
+    }
+    searchDebounceTimer = setTimeout(function () { runGlobalSearch(term); }, 400);
+  });
+
+  Array.prototype.forEach.call(searchTypeFilterEl.children, function (chip) {
+    chip.addEventListener('click', function () {
+      currentSearchTypeFilter = chip.dataset.type;
+      Array.prototype.forEach.call(searchTypeFilterEl.children, function (c) { c.classList.toggle('active', c === chip); });
+      applySearchFilter();
+    });
+  });
+
+  function runGlobalSearch(term) {
+    searchResultListEl.innerHTML = '<li class="empty">搜尋中…</li>';
+    fetch(settings.gasUrl + '?action=searchFiles&q=' + encodeURIComponent(term) + '&passKey=' + encodeURIComponent(settings.passKey))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          currentSearchResults = data.files || [];
+          applySearchFilter();
+        } else {
+          searchResultListEl.innerHTML = '<li class="empty">搜尋失敗</li>';
+        }
+      })
+      .catch(function () {
+        searchResultListEl.innerHTML = '<li class="empty">離線中,無法搜尋</li>';
+      });
+  }
+
+  function applySearchFilter() {
+    if (currentSearchResults.length === 0) {
+      searchResultListEl.innerHTML = '<li class="empty">找不到符合的檔案</li>';
+      return;
+    }
+    var filtered = currentSearchTypeFilter
+      ? currentSearchResults.filter(function (f) { return f.type === currentSearchTypeFilter; })
+      : currentSearchResults;
+    if (filtered.length === 0) {
+      searchResultListEl.innerHTML = '<li class="empty">找不到符合的檔案</li>';
+      return;
+    }
+    renderBrowseCourseList(filtered, { listEl: searchResultListEl, showTag: true });
   }
 
   function removeCourse(name, btnEl) {
