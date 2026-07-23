@@ -107,18 +107,14 @@ function syncCoursesFromFolders() {
   courses.forEach(function (c) { lowerSet[c.toLowerCase()] = true; });
 
   const added = [];
-  const it = root.getFolders();
-  while (it.hasNext()) {
-    const folder = it.next();
-    if (folder.getId() === inboxId) continue;
-    if (folder.isTrashed()) continue; // 垃圾桶裡的資料夾不算,避免把剛刪掉的課程又補回清單
+  getCourseFoldersUnderRoot(root, inboxId).forEach(function (folder) {
     const name = folder.getName();
     if (!lowerSet[name.toLowerCase()]) {
       courses.push(name);
       lowerSet[name.toLowerCase()] = true;
       added.push(name);
     }
-  }
+  });
 
   if (added.length > 0) {
     props.setProperty('COURSES', JSON.stringify(courses));
@@ -188,7 +184,7 @@ function autoResolvePendingCleanup(props) {
 
   const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
   const stillPending = pending.filter(function (p) {
-    return activeFolderExists(root, p.name);
+    return courseFolderExists(root, p.name, props);
   });
 
   if (stillPending.length !== pending.length) {
@@ -203,11 +199,30 @@ function autoResolvePendingCleanup(props) {
  * 所以一定要額外用 isTrashed() 過濾,否則「移到垃圾桶」會被誤判成資料夾還在。
  */
 function activeFolderExists(root, name) {
-  const it = root.getFoldersByName(name);
+  return findActiveFolder(root, name) !== null;
+}
+
+/**
+ * 跟 activeFolderExists() 不同,這個會考慮課程目前有沒有被指定分類——分類過的課程資料夾
+ * 不是直接在根目錄下,要先找到分類資料夾才找得到。待清理提醒(autoResolvePendingCleanup/
+ * handleRemoveCourse)都要用這個,不能只查根目錄,不然分類過的課程會被誤判成資料夾已經刪除。
+ */
+function courseFolderExists(root, courseName, props) {
+  const category = getCourseCategory(courseName, props);
+  const parent = category ? findActiveFolder(root, category) : root;
+  return parent ? findActiveFolder(parent, courseName) !== null : false;
+}
+
+/**
+ * 跟 getOrCreateFolder() 不同,這個只找、不建立;找不到(或只找到垃圾桶裡的同名資料夾)回傳 null。
+ */
+function findActiveFolder(parent, name) {
+  const it = parent.getFoldersByName(name);
   while (it.hasNext()) {
-    if (!it.next().isTrashed()) return true;
+    const folder = it.next();
+    if (!folder.isTrashed()) return folder;
   }
-  return false;
+  return null;
 }
 
 function extractFileId(url) {
@@ -220,7 +235,7 @@ function extractFileId(url) {
 
 /**
  * GET 端點:
- *   ?action=courses&passKey=xxx              → 回傳課程標籤清單 (PWA 開啟時抓取,需帶金鑰)
+ *   ?action=courses&passKey=xxx              → 回傳課程標籤清單 + 各課程的分類(PWA 開啟時抓取,需帶金鑰)
  *   ?action=pendingCleanup&passKey=xxx       → 回傳「已從清單刪除但 Drive 資料夾還在」的待清理提醒
  *   ?action=listFiles&course=X&passKey=xxx   → 回傳某課程底下所有照片/錄音/筆記清單
  *   ?action=podcastJobStatus&passKey=xxx     → 回傳目前 Podcast 背景下載工作的進度(見 startPodcastJob())
@@ -235,7 +250,8 @@ function doGet(e) {
       return jsonResponse({ ok: false, error: 'unauthorized' });
     }
     const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
-    return jsonResponse({ ok: true, courses: courses });
+    const courseCategories = JSON.parse(props.getProperty('COURSE_CATEGORIES') || '{}');
+    return jsonResponse({ ok: true, courses: courses, courseCategories: courseCategories });
   }
 
   if (action === 'pendingCleanup') {
@@ -315,6 +331,10 @@ function getFilesForCourse(courseName, props) {
  * POST 端點:
  *   action: 'addCourse'     → PWA 新增課程用。Body: { passKey, action, courseName }
  *   action: 'removeCourse'  → PWA 刪除課程用。Body: { passKey, action, courseName }
+ *   action: 'setCourseCategory' → PWA 管理課程指定分類用。Body: { passKey, action, courseName, category }
+ *                              category 是「學習」「工作」「投資」其中之一,或空字串代表未分類。
+ *                              如果這個課程已經有建立過 Drive 資料夾,會實際搬到新分類底下(見
+ *                              handleSetCourseCategory())。
  *   action: 'dismissCleanup'→ PWA 確認已手動清理 Drive 用。Body: { passKey, action, courseName }
  *   action: 'saveNote'      → PWA 課堂筆記存檔用。Body: { passKey, action, courseName, blocks }
  *                              同一天、同一課程共用同一份 Google 文件,重複呼叫是覆蓋更新,不會
@@ -380,6 +400,9 @@ function doPost(e) {
     if (body.action === 'removeCourse') {
       return handleRemoveCourse(body, props);
     }
+    if (body.action === 'setCourseCategory') {
+      return handleSetCourseCategory(body, props);
+    }
     if (body.action === 'dismissCleanup') {
       return handleDismissCleanup(body, props);
     }
@@ -439,12 +462,56 @@ function handleRemoveCourse(body, props) {
   // 如果 Drive 裡這個課程還有實際資料夾(代表真的有存過檔案),記一筆待清理提醒
   const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
   let pending = JSON.parse(props.getProperty('PENDING_CLEANUP') || '[]');
-  if (activeFolderExists(root, actualName) && !pending.some(function (p) { return p.name.toLowerCase() === actualName.toLowerCase(); })) {
+  if (courseFolderExists(root, actualName, props) && !pending.some(function (p) { return p.name.toLowerCase() === actualName.toLowerCase(); })) {
     pending.push({ name: actualName, removedAt: new Date().toISOString() });
     props.setProperty('PENDING_CLEANUP', JSON.stringify(pending));
   }
 
   return jsonResponse({ ok: true, courses: courses, pending: pending });
+}
+
+/**
+ * 幫課程指定/取消分類。如果這個課程已經有建立過 Drive 資料夾,實際用 Folder.moveTo() 搬到
+ * 新分類底下(還沒建立過的話只更新分類設定,之後第一次歸檔就會直接建在新位置,不用搬)。
+ */
+function handleSetCourseCategory(body, props) {
+  const name = String(body.courseName || '').trim();
+  const category = String(body.category || '').trim();
+  if (!name) {
+    return jsonResponse({ ok: false, error: '缺少課程名稱' });
+  }
+  if (category && CATEGORY_LIST.indexOf(category) === -1) {
+    return jsonResponse({ ok: false, error: '不支援的分類' });
+  }
+
+  const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
+  const idx = courses.findIndex(function (c) { return c.toLowerCase() === name.toLowerCase(); });
+  if (idx === -1) {
+    return jsonResponse({ ok: false, error: 'course not found' });
+  }
+  const actualName = courses[idx];
+
+  const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
+  const oldCategory = getCourseCategory(actualName, props);
+
+  if (oldCategory !== category) {
+    const oldParent = oldCategory ? findActiveFolder(root, oldCategory) : root;
+    const existingCourseFolder = oldParent ? findActiveFolder(oldParent, actualName) : null;
+    if (existingCourseFolder) {
+      const newParent = category ? getOrCreateFolder(root, category) : root;
+      existingCourseFolder.moveTo(newParent);
+    }
+
+    const map = JSON.parse(props.getProperty('COURSE_CATEGORIES') || '{}');
+    if (category) {
+      map[actualName] = category;
+    } else {
+      delete map[actualName];
+    }
+    props.setProperty('COURSE_CATEGORIES', JSON.stringify(map));
+  }
+
+  return jsonResponse({ ok: true, category: category });
 }
 
 function handleDismissCleanup(body, props) {
@@ -577,6 +644,55 @@ function normalizeTag(tag, props) {
 
 const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', note: '筆記', podcast: 'Podcast', doc: '文件' };
 
+// 課程分類保留字。分類本身只是根目錄底下的普通資料夾,課程可以選擇性歸到裡面分組管理;
+// 沒被指定分類的課程維持現況(資料夾直接在根目錄下,不建分類這層)。
+// 已知邊界情況:如果剛好有課程名稱跟這三個字完全相同,對帳/掃描(見 getCourseFoldersUnderRoot）
+// 會把它誤判成分類資料夾而不是課程,機率很低,真的遇到請先把那個課程改名。
+const CATEGORY_LIST = ['學習', '工作', '投資'];
+
+/**
+ * 查課程目前的分類(COURSE_CATEGORIES 屬性,{課程名: 分類} 的 JSON 物件),
+ * 沒登記回傳空字串,代表「未分類」——維持現況,不會多一層分類資料夾。
+ */
+function getCourseCategory(courseName, props) {
+  const map = JSON.parse(props.getProperty('COURSE_CATEGORIES') || '{}');
+  return map[courseName] || '';
+}
+
+/**
+ * 找/建一個課程的資料夾,依照它目前有沒有被指定分類,決定要不要先經過分類資料夾這層。
+ * fileIntoLibrary()/saveNote()/startPodcastJob() 都改呼叫這個,不再各自內聯 getOrCreateFolder(root, safeTag)。
+ */
+function getCourseFolder(root, safeTag, props) {
+  const category = getCourseCategory(safeTag, props);
+  const parent = category ? getOrCreateFolder(root, category) : root;
+  return getOrCreateFolder(parent, safeTag);
+}
+
+/**
+ * 走訪根目錄底下所有「課程資料夾」,把分類這層攤平——分類資料夾(名稱剛好是 CATEGORY_LIST
+ * 其中之一)底下的課程資料夾會被撈出來,其他直接子資料夾當成未分類課程(現況行為)。
+ * reconcileIndex()/syncCoursesFromFolders() 都改呼叫這個取代原本直接走訪 root.getFolders()。
+ */
+function getCourseFoldersUnderRoot(root, inboxId) {
+  const result = [];
+  const it = root.getFolders();
+  while (it.hasNext()) {
+    const folder = it.next();
+    if (folder.getId() === inboxId || folder.isTrashed()) continue;
+    if (CATEGORY_LIST.indexOf(folder.getName()) !== -1) {
+      const sub = folder.getFolders();
+      while (sub.hasNext()) {
+        const courseFolder = sub.next();
+        if (!courseFolder.isTrashed()) result.push(courseFolder);
+      }
+    } else {
+      result.push(folder);
+    }
+  }
+  return result;
+}
+
 /**
  * 如果這個標籤(忽略大小寫)還沒登記在課程清單裡,自動加進去。
  * 讓「錄音手動打新課程名稱 → 自動建資料夾」跟「App 課程清單」保持同步,
@@ -610,7 +726,7 @@ function fileIntoLibrary(blob, type, tag, source, note) {
   const safeTag = String(tag || '未分類').replace(/[\\\/:*?"<>|]/g, '') || '未分類';
   registerCourseIfNew(safeTag, props);
 
-  const courseFolder = getOrCreateFolder(root, safeTag);
+  const courseFolder = getCourseFolder(root, safeTag, props);
   const yearFolder = getOrCreateFolder(courseFolder, yyyy);
   const monthFolder = getOrCreateFolder(yearFolder, mm);
   const typeFolder = getOrCreateFolder(monthFolder, typeFolderName);
@@ -655,7 +771,7 @@ function saveNote(courseTag, blocks, props) {
   const safeTag = String(courseTag || '未分類').replace(/[\\\/:*?"<>|]/g, '') || '未分類';
   registerCourseIfNew(safeTag, props);
 
-  const courseFolder = getOrCreateFolder(root, safeTag);
+  const courseFolder = getCourseFolder(root, safeTag, props);
   const yearFolder = getOrCreateFolder(courseFolder, yyyy);
   const monthFolder = getOrCreateFolder(yearFolder, mm);
   const noteFolder = getOrCreateFolder(monthFolder, TYPE_FOLDER_NAME.note);
@@ -849,7 +965,7 @@ function startPodcastJob(appleUrl, tag, props) {
   const now = new Date();
   const yyyy = Utilities.formatDate(now, 'Asia/Taipei', 'yyyy');
   const mm = Utilities.formatDate(now, 'Asia/Taipei', 'MM');
-  const courseFolder = getOrCreateFolder(root, safeTag);
+  const courseFolder = getCourseFolder(root, safeTag, props);
   const yearFolder = getOrCreateFolder(courseFolder, yyyy);
   const monthFolder = getOrCreateFolder(yearFolder, mm);
   const typeFolder = getOrCreateFolder(monthFolder, TYPE_FOLDER_NAME.podcast);
@@ -857,8 +973,12 @@ function startPodcastJob(appleUrl, tag, props) {
   const extMatch = audioUrl.match(/\.(mp3|m4a|wav|aac)(\?|$)/i);
   const ext = extMatch ? extMatch[1].toLowerCase() : 'mp3';
   const mimeType = { mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac' }[ext] || 'audio/mpeg';
+  // 檔名直接用集數標題(使用者才好在 Drive 裡憑原始標題找到這一集),不是統一的時間戳記格式;
+  // 清掉路徑不合法字元、截長度避免超出檔名長度限制,萬一清完是空字串(標題整段都是特殊符號這種
+  // 極端情況)才退回原本的時間戳記命名當保底。
   const stamp = Utilities.formatDate(now, 'Asia/Taipei', 'yyyyMMdd_HHmm');
-  const fileName = TYPE_FOLDER_NAME.podcast + '_' + stamp + '_' + safeTag + '.' + ext;
+  const safeTitle = String(episodeTitle).replace(/[\\\/:*?"<>|]/g, '').trim().slice(0, 150);
+  const fileName = (safeTitle || (TYPE_FOLDER_NAME.podcast + '_' + stamp + '_' + safeTag)) + '.' + ext;
 
   const uploadUrl = initDriveResumableUpload(fileName, mimeType, typeFolder.getId());
 
@@ -1210,14 +1330,11 @@ function reconcileIndex() {
       }
     }
 
-    // 2. 走訪每個課程資料夾(排除收件夾、垃圾桶),收集實際存在的檔案;沒登記到索引表的就準備補登
+    // 2. 走訪每個課程資料夾(排除收件夾、垃圾桶、分類這層本身),收集實際存在的檔案;
+    //    沒登記到索引表的就準備補登
     const actualIds = {};
     const newRows = [];
-    const courseIt = root.getFolders();
-    while (courseIt.hasNext()) {
-      const courseFolder = courseIt.next();
-      if (courseFolder.getId() === inboxId) continue;
-      if (courseFolder.isTrashed()) continue;
+    getCourseFoldersUnderRoot(root, inboxId).forEach(function (courseFolder) {
       // 用課程清單裡登記的大小寫版本(如果有的話),避免資料夾被手動改過大小寫時,
       // 補登進索引表的標籤跟課程清單顯示的名稱不一致。
       const courseName = normalizeTag(courseFolder.getName(), props);
@@ -1243,7 +1360,7 @@ function reconcileIndex() {
       }
 
       if (courseHasFiles) registerCourseIfNew(courseName, props);
-    }
+    });
 
     // 3. 索引表有、但走訪時沒看到的檔案:逐一用 getFileById 確認是否真的沒了(避免誤刪被移出課程結構的檔案)
     const rowsToDelete = [];

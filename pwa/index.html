@@ -210,13 +210,25 @@
     text-decoration: underline; background: none; border: none;
   }
 
+  #manageCourseSearchInput, #browseSearchInput { margin-bottom: 10px; }
+
+  .manage-category-header {
+    font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em;
+    margin: 14px 0 4px; padding-top: 8px; border-top: 1px solid var(--border);
+  }
+  .manage-category-header:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+
   ul.manage-course-list { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto; }
   ul.manage-course-list li {
     display: flex; justify-content: space-between; align-items: center; gap: 8px;
     padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px;
   }
   ul.manage-course-list li:last-child { border-bottom: none; }
-  ul.manage-course-list .manage-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  ul.manage-course-list .manage-actions { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
+  .course-category-select {
+    flex-shrink: 0; padding: 5px 6px; border-radius: 8px; border: 1px solid var(--border);
+    background: #0f172a; color: var(--text); font-size: 12px;
+  }
   .delete-course-btn {
     flex-shrink: 0; border: 1px solid var(--err); color: var(--err); background: none;
     padding: 5px 10px; border-radius: 8px; font-size: 12px; cursor: pointer;
@@ -225,6 +237,14 @@
     flex-shrink: 0; border: 1px solid var(--accent); color: var(--accent); background: none;
     padding: 5px 10px; border-radius: 8px; font-size: 12px; cursor: pointer;
   }
+
+  .browse-type-filter { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .browse-type-chip {
+    border: 1px solid var(--border); background: transparent; color: var(--text);
+    padding: 6px 10px; border-radius: 999px; font-size: 12px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .browse-type-chip.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 700; }
 
   ul.browse-course-list { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto; }
   ul.browse-course-list li { border-bottom: 1px solid var(--border); }
@@ -413,6 +433,7 @@
 <dialog id="manageCoursesDialog">
   <div class="dialog-body">
     <h3>管理課程</h3>
+    <input type="text" id="manageCourseSearchInput" placeholder="搜尋課程…">
     <ul class="manage-course-list" id="manageCourseList"></ul>
     <div class="dialog-actions">
       <button id="closeManageCourses">關閉</button>
@@ -423,6 +444,15 @@
 <dialog id="browseCourseDialog">
   <div class="dialog-body">
     <h3 id="browseCourseTitle">課程內容</h3>
+    <input type="text" id="browseSearchInput" placeholder="搜尋檔名/標題…">
+    <div class="browse-type-filter" id="browseTypeFilter">
+      <button type="button" class="browse-type-chip active" data-type="">全部</button>
+      <button type="button" class="browse-type-chip" data-type="照片">📷</button>
+      <button type="button" class="browse-type-chip" data-type="錄音">🎙️</button>
+      <button type="button" class="browse-type-chip" data-type="筆記">📝</button>
+      <button type="button" class="browse-type-chip" data-type="Podcast">🎧</button>
+      <button type="button" class="browse-type-chip" data-type="文件">📄</button>
+    </div>
     <ul class="browse-course-list" id="browseCourseList"></ul>
     <div class="dialog-actions">
       <button id="closeBrowseCourse">關閉</button>
@@ -458,11 +488,14 @@
   var courseRecentEl = document.getElementById('courseRecent');
   var manageCoursesDialog = document.getElementById('manageCoursesDialog');
   var manageCourseListEl = document.getElementById('manageCourseList');
+  var manageCourseSearchInput = document.getElementById('manageCourseSearchInput');
   var cleanupCard = document.getElementById('cleanupCard');
   var cleanupListEl = document.getElementById('cleanupList');
   var browseCourseDialog = document.getElementById('browseCourseDialog');
   var browseCourseTitleEl = document.getElementById('browseCourseTitle');
   var browseCourseListEl = document.getElementById('browseCourseList');
+  var browseSearchInput = document.getElementById('browseSearchInput');
+  var browseTypeFilterEl = document.getElementById('browseTypeFilter');
   var noteEditor = document.getElementById('noteEditor');
   var chapterNavEl = document.getElementById('chapterNav');
   var saveNoteBtn = document.getElementById('saveNoteBtn');
@@ -589,6 +622,7 @@
       toast('請先填寫連線設定');
       return;
     }
+    manageCourseSearchInput.value = '';
     renderManageCourseList();
     manageCoursesDialog.showModal();
   });
@@ -672,36 +706,111 @@
 
   function autoSync() { runSync(); }
 
+  var COURSE_CATEGORY_GROUPS = ['學習', '工作', '投資', '']; // 空字串= 未分類,固定排最後
+  var COURSE_CATEGORY_LABEL = { '學習': '學習', '工作': '工作', '投資': '投資', '': '未分類' };
+
   function renderManageCourseList() {
     manageCourseListEl.innerHTML = '';
     if (currentCourses.length === 0) {
       manageCourseListEl.innerHTML = '<li class="empty">尚無課程</li>';
       return;
     }
-    currentCourses.slice().sort(function (a, b) { return a.localeCompare(b, 'zh-Hant'); }).forEach(function (c) {
-      var li = document.createElement('li');
-      var name = document.createElement('span');
-      name.textContent = c;
 
-      var actions = document.createElement('div');
-      actions.className = 'manage-actions';
+    var term = manageCourseSearchInput.value.trim().toLowerCase();
+    var filtered = term
+      ? currentCourses.filter(function (c) { return c.toLowerCase().indexOf(term) !== -1; })
+      : currentCourses.slice();
 
-      var browseBtn = document.createElement('button');
-      browseBtn.className = 'browse-course-btn';
-      browseBtn.textContent = '瀏覽';
-      browseBtn.addEventListener('click', function () { openBrowseCourse(c); });
+    if (filtered.length === 0) {
+      manageCourseListEl.innerHTML = '<li class="empty">找不到符合的課程</li>';
+      return;
+    }
 
-      var delBtn = document.createElement('button');
-      delBtn.className = 'delete-course-btn';
-      delBtn.textContent = '刪除';
-      delBtn.addEventListener('click', function () { removeCourse(c, delBtn); });
-
-      actions.appendChild(browseBtn);
-      actions.appendChild(delBtn);
-      li.appendChild(name);
-      li.appendChild(actions);
-      manageCourseListEl.appendChild(li);
+    // 依分類分組(學習 → 工作 → 投資 → 未分類),組內依名稱排序,篩選後空的分類不顯示
+    var groups = {};
+    COURSE_CATEGORY_GROUPS.forEach(function (g) { groups[g] = []; });
+    filtered.forEach(function (c) {
+      var cat = currentCourseCategories[c] || '';
+      if (!groups[cat]) groups[cat] = []; // 保險:遇到非預期分類值也不會漏掉課程
+      groups[cat].push(c);
     });
+
+    COURSE_CATEGORY_GROUPS.forEach(function (cat) {
+      var list = groups[cat];
+      if (!list || list.length === 0) return;
+      list.sort(function (a, b) { return a.localeCompare(b, 'zh-Hant'); });
+
+      var header = document.createElement('li');
+      header.className = 'manage-category-header';
+      header.textContent = COURSE_CATEGORY_LABEL[cat] || cat;
+      header.style.listStyle = 'none';
+      manageCourseListEl.appendChild(header);
+
+      list.forEach(function (c) {
+        var li = document.createElement('li');
+        var name = document.createElement('span');
+        name.textContent = c;
+
+        var actions = document.createElement('div');
+        actions.className = 'manage-actions';
+
+        var catSelect = document.createElement('select');
+        catSelect.className = 'course-category-select';
+        COURSE_CATEGORY_GROUPS.forEach(function (g) {
+          var opt = document.createElement('option');
+          opt.value = g;
+          opt.textContent = COURSE_CATEGORY_LABEL[g] || g;
+          if (g === cat) opt.selected = true;
+          catSelect.appendChild(opt);
+        });
+        catSelect.addEventListener('change', function () { setCourseCategory(c, catSelect.value, catSelect); });
+
+        var browseBtn = document.createElement('button');
+        browseBtn.className = 'browse-course-btn';
+        browseBtn.textContent = '瀏覽';
+        browseBtn.addEventListener('click', function () { openBrowseCourse(c); });
+
+        var delBtn = document.createElement('button');
+        delBtn.className = 'delete-course-btn';
+        delBtn.textContent = '刪除';
+        delBtn.addEventListener('click', function () { removeCourse(c, delBtn); });
+
+        actions.appendChild(catSelect);
+        actions.appendChild(browseBtn);
+        actions.appendChild(delBtn);
+        li.appendChild(name);
+        li.appendChild(actions);
+        manageCourseListEl.appendChild(li);
+      });
+    });
+  }
+
+  manageCourseSearchInput.addEventListener('input', renderManageCourseList);
+
+  function setCourseCategory(courseName, category, selectEl) {
+    selectEl.disabled = true;
+    fetch(settings.gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ passKey: settings.passKey, action: 'setCourseCategory', courseName: courseName, category: category })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        selectEl.disabled = false;
+        if (data.ok) {
+          if (category) currentCourseCategories[courseName] = category; else delete currentCourseCategories[courseName];
+          localStorage.setItem('courseCategoriesCache', JSON.stringify(currentCourseCategories));
+          renderManageCourseList();
+        } else {
+          toast('分類更新失敗:' + (data.error || '未知錯誤'));
+          renderManageCourseList(); // 選單重新渲染回原本的分類,避免畫面跟後端狀態對不上
+        }
+      })
+      .catch(function () {
+        selectEl.disabled = false;
+        toast('離線中,無法連線,請連網後再試');
+        renderManageCourseList();
+      });
   }
 
   // ---------- 瀏覽課程內容 ----------
@@ -709,26 +818,63 @@
     browseCourseDialog.close();
   });
 
+  // 課程內容抓回來就整批存著,搜尋/類型篩選只是本地重新渲染,不用每次都重打 API
+  var currentBrowseFiles = [];
+  var currentBrowseTypeFilter = ''; // 空字串 = 全部
+
   function openBrowseCourse(name) {
     browseCourseTitleEl.textContent = name;
+    browseSearchInput.value = '';
+    currentBrowseTypeFilter = '';
+    Array.prototype.forEach.call(browseTypeFilterEl.children, function (chip) {
+      chip.classList.toggle('active', chip.dataset.type === '');
+    });
+    currentBrowseFiles = [];
     browseCourseListEl.innerHTML = '<li class="empty">載入中…</li>';
     browseCourseDialog.showModal();
     fetch(settings.gasUrl + '?action=listFiles&course=' + encodeURIComponent(name) + '&passKey=' + encodeURIComponent(settings.passKey))
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        if (data.ok) renderBrowseCourseList(data.files);
-        else browseCourseListEl.innerHTML = '<li class="empty">載入失敗</li>';
+        if (data.ok) {
+          currentBrowseFiles = data.files || [];
+          applyBrowseFilter();
+        } else {
+          browseCourseListEl.innerHTML = '<li class="empty">載入失敗</li>';
+        }
       })
       .catch(function () {
         browseCourseListEl.innerHTML = '<li class="empty">離線中,無法載入</li>';
       });
   }
 
-  function renderBrowseCourseList(files) {
-    if (!files || files.length === 0) {
+  browseSearchInput.addEventListener('input', applyBrowseFilter);
+  Array.prototype.forEach.call(browseTypeFilterEl.children, function (chip) {
+    chip.addEventListener('click', function () {
+      currentBrowseTypeFilter = chip.dataset.type;
+      Array.prototype.forEach.call(browseTypeFilterEl.children, function (c) { c.classList.toggle('active', c === chip); });
+      applyBrowseFilter();
+    });
+  });
+
+  function applyBrowseFilter() {
+    if (currentBrowseFiles.length === 0) {
       browseCourseListEl.innerHTML = '<li class="empty">這門課還沒有任何照片、錄音、筆記或 Podcast</li>';
       return;
     }
+    var term = browseSearchInput.value.trim().toLowerCase();
+    var filtered = currentBrowseFiles.filter(function (f) {
+      if (currentBrowseTypeFilter && f.type !== currentBrowseTypeFilter) return false;
+      if (term && (f.note || f.filename || '').toLowerCase().indexOf(term) === -1) return false;
+      return true;
+    });
+    if (filtered.length === 0) {
+      browseCourseListEl.innerHTML = '<li class="empty">找不到符合的檔案</li>';
+      return;
+    }
+    renderBrowseCourseList(filtered);
+  }
+
+  function renderBrowseCourseList(files) {
     browseCourseListEl.innerHTML = '';
     files.forEach(function (f) {
       var li = document.createElement('li');
@@ -859,6 +1005,7 @@
   // ---------- 課程清單 ----------
   var RECENT_THRESHOLD = 6; // 課程數超過這個數字才顯示「最近使用」跟搜尋框的必要性提高
   var currentCourses = [];
+  var currentCourseCategories = JSON.parse(localStorage.getItem('courseCategoriesCache') || '{}'); // {課程名: 分類}
 
   function getRecency() {
     try { return JSON.parse(localStorage.getItem('courseRecency') || '{}'); }
@@ -962,6 +1109,8 @@
       .then(function (data) {
         if (data.ok) {
           localStorage.setItem('coursesCache', JSON.stringify(data.courses));
+          currentCourseCategories = data.courseCategories || {};
+          localStorage.setItem('courseCategoriesCache', JSON.stringify(currentCourseCategories));
           renderCourses(data.courses);
         }
       })
