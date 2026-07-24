@@ -377,7 +377,7 @@ function searchFilesAcrossCourses(query, props) {
  *   action: 'addCourse'     → PWA 新增課程用。Body: { passKey, action, courseName }
  *   action: 'removeCourse'  → PWA 刪除課程用。Body: { passKey, action, courseName }
  *   action: 'setCourseCategory' → PWA 管理課程指定分類用。Body: { passKey, action, courseName, category }
- *                              category 是「學習」「工作」「投資」其中之一,或空字串代表未分類。
+ *                              category 是「學習」「工作」「投資」「家庭」其中之一,或空字串代表未分類。
  *                              如果這個課程已經有建立過 Drive 資料夾,會實際搬到新分類底下(見
  *                              handleSetCourseCategory())。
  *   action: 'dismissCleanup'→ PWA 確認已手動清理 Drive 用。Body: { passKey, action, courseName }
@@ -691,9 +691,9 @@ const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', note: '筆記', pod
 
 // 課程分類保留字。分類本身只是根目錄底下的普通資料夾,課程可以選擇性歸到裡面分組管理;
 // 沒被指定分類的課程維持現況(資料夾直接在根目錄下,不建分類這層)。
-// 已知邊界情況:如果剛好有課程名稱跟這三個字完全相同,對帳/掃描(見 getCourseFoldersUnderRoot）
+// 已知邊界情況:如果剛好有課程名稱跟這幾個字完全相同,對帳/掃描(見 getCourseFoldersUnderRoot）
 // 會把它誤判成分類資料夾而不是課程,機率很低,真的遇到請先把那個課程改名。
-const CATEGORY_LIST = ['學習', '工作', '投資'];
+const CATEGORY_LIST = ['學習', '工作', '投資', '家庭'];
 
 /**
  * 查課程目前的分類(COURSE_CATEGORIES 屬性,{課程名: 分類} 的 JSON 物件),

@@ -759,8 +759,8 @@
 
   function autoSync() { runSync(); }
 
-  var COURSE_CATEGORY_GROUPS = ['學習', '工作', '投資', '']; // 空字串= 未分類,固定排最後
-  var COURSE_CATEGORY_LABEL = { '學習': '學習', '工作': '工作', '投資': '投資', '': '未分類' };
+  var COURSE_CATEGORY_GROUPS = ['學習', '工作', '投資', '家庭', '']; // 空字串= 未分類,固定排最後
+  var COURSE_CATEGORY_LABEL = { '學習': '學習', '工作': '工作', '投資': '投資', '家庭': '家庭', '': '未分類' };
 
   function renderManageCourseList() {
     manageCourseListEl.innerHTML = '';
@@ -779,7 +779,7 @@
       return;
     }
 
-    // 依分類分組(學習 → 工作 → 投資 → 未分類),組內依名稱排序,篩選後空的分類不顯示
+    // 依分類分組(學習 → 工作 → 投資 → 家庭 → 未分類),組內依名稱排序,篩選後空的分類不顯示
     var groups = {};
     COURSE_CATEGORY_GROUPS.forEach(function (g) { groups[g] = []; });
     filtered.forEach(function (c) {
@@ -1219,7 +1219,7 @@
       return;
     }
 
-    // 依分類分組(學習 → 工作 → 投資 → 未分類),課程一多時比一長串平鋪好找,
+    // 依分類分組(學習 → 工作 → 投資 → 家庭 → 未分類),課程一多時比一長串平鋪好找,
     // 分組常數跟「管理課程」共用(COURSE_CATEGORY_GROUPS/LABEL)。
     var groups = {};
     COURSE_CATEGORY_GROUPS.forEach(function (g) { groups[g] = []; });
