@@ -1266,69 +1266,6 @@ function decodeHtmlEntities(text) {
     .replace(/&gt;/g, '>');
 }
 
-// ============ 一次性搬移工具(舊結構 年/月/類型 → 新結構 課程/年/月/類型) ============
-
-/**
- * 只需執行一次。掃描舊的「隨時資料庫/年/月/類型/檔案」結構,
- * 從檔名解析出課程標籤,搬到新的「隨時資料庫/課程/年/月/類型/檔案」結構,
- * 最後把搬空的舊資料夾清掉。執行完看「執行紀錄」確認搬移數量。
- * 重複執行是安全的(已經搬過的檔案不會再被找到,不會重複處理)。
- */
-function migrateToCourseFolders() {
-  const props = PropertiesService.getScriptProperties();
-  const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
-  const inboxId = props.getProperty('INBOX_FOLDER_ID');
-  const nameRe = /^.+?_\d{8}_\d{4}_(.+)\.[A-Za-z0-9]+$/;
-
-  let moved = 0;
-
-  const yearFolders = root.getFolders();
-  while (yearFolders.hasNext()) {
-    const yearFolder = yearFolders.next();
-    if (!/^\d{4}$/.test(yearFolder.getName())) continue; // 只處理年份資料夾(4位數字),避免誤動到課程資料夾
-
-    const monthFolders = yearFolder.getFolders();
-    while (monthFolders.hasNext()) {
-      const monthFolder = monthFolders.next();
-      const typeFolders = monthFolder.getFolders();
-      while (typeFolders.hasNext()) {
-        const typeFolder = typeFolders.next();
-        const files = typeFolder.getFiles();
-        while (files.hasNext()) {
-          const file = files.next();
-          const m = file.getName().match(nameRe);
-          const tag = m ? m[1] : '未分類';
-
-          const courseFolder = getOrCreateFolder(root, tag);
-          const newYearFolder = getOrCreateFolder(courseFolder, yearFolder.getName());
-          const newMonthFolder = getOrCreateFolder(newYearFolder, monthFolder.getName());
-          const newTypeFolder = getOrCreateFolder(newMonthFolder, typeFolder.getName());
-
-          file.moveTo(newTypeFolder);
-          moved++;
-        }
-      }
-    }
-  }
-
-  cleanupEmptyFolders(root, inboxId);
-  Logger.log('搬移完成:共搬移 ' + moved + ' 個檔案,舊的空資料夾已清除。');
-}
-
-function cleanupEmptyFolders(folder, protectedId) {
-  const subfolders = [];
-  const it = folder.getFolders();
-  while (it.hasNext()) subfolders.push(it.next());
-
-  subfolders.forEach(function (sub) {
-    if (sub.getId() === protectedId) return;
-    cleanupEmptyFolders(sub, protectedId);
-    if (!sub.getFiles().hasNext() && !sub.getFolders().hasNext()) {
-      sub.setTrashed(true);
-    }
-  });
-}
-
 // ============ 對帳工具(讓索引表跟 Drive 實際內容完全同步) ============
 
 /**
