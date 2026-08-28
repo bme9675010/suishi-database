@@ -1,0 +1,25 @@
+name: Run tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps-script/**'
+      - 'tests/**'
+      - '.github/workflows/test.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # 沒有任何相依套件,不用 npm install —— 測試只用 Node 內建的 node:test / node:assert / node:vm
+      - name: Run tests
+        run: node --test
