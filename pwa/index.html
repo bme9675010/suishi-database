@@ -694,9 +694,14 @@
   var lastAutoSync = 0;
   var AUTO_SYNC_MIN_GAP = 60000; // 至少間隔 60 秒才會再自動同步一次,避免頻繁切換 App 一直觸發全樹掃描
 
-  function setSyncStatus(state, added, removed) {
+  // 後端對帳是全樹掃描,單次執行超過 6 分鐘會被 Apps Script 中斷。超過這個秒數就在
+  // 同步狀態多加一句提醒 —— 目的是在真的撞到上限前先看出「愈跑愈久」,而不是等它整個壞掉。
+  var SYNC_SLOW_WARN_SEC = 90;
+
+  function setSyncStatus(state, added, removed, ms) {
     var rec = { t: Date.now(), state: state };
     if (typeof added === 'number') { rec.added = added; rec.removed = removed; }
+    if (typeof ms === 'number') { rec.ms = ms; }
     localStorage.setItem('lastSync', JSON.stringify(rec));
     renderSyncStatus();
   }
@@ -711,7 +716,15 @@
       var when = new Date(r.t).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
       if (r.state === 'ok') {
         var change = (r.added || r.removed) ? '(補登 ' + r.added + '、清除 ' + r.removed + ')' : '(無變更)';
-        el.textContent = '上次同步:' + when + ' · 成功 ' + change;
+        var text = '上次同步:' + when + ' · 成功 ' + change;
+        if (typeof r.ms === 'number') {
+          var sec = r.ms / 1000;
+          text += ' · 耗時 ' + sec.toFixed(1) + ' 秒';
+          if (sec >= SYNC_SLOW_WARN_SEC) {
+            text += '(偏慢,檔案量已經很大,再變慢可能會同步失敗)';
+          }
+        }
+        el.textContent = text;
       } else {
         el.textContent = '上次同步:' + when + ' · 失敗,請檢查網路或 Apps Script 部署';
       }
@@ -741,7 +754,7 @@
       .then(function (data) {
         restoreBtn();
         if (data.ok) {
-          setSyncStatus('ok', data.added, data.removed);
+          setSyncStatus('ok', data.added, data.removed, data.ms);
           if (data.added > 0 || data.removed > 0) {
             refreshCourses();
             refreshPendingCleanup();

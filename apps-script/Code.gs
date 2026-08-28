@@ -418,7 +418,7 @@ function doPost(e) {
     try {
       const r = reconcileIndex();
       if (!r) return jsonResponse({ ok: false, error: 'server busy, please retry' });
-      return jsonResponse({ ok: true, added: r.added, removed: r.removed });
+      return jsonResponse({ ok: true, added: r.added, removed: r.removed, ms: r.ms });
     } catch (err) {
       return jsonResponse({ ok: false, error: String(err) });
     }
@@ -1350,6 +1350,7 @@ function cleanupEmptyFolders(folder, protectedId) {
  *     Apps Script 6 分鐘上限,屆時再改成分批處理。
  */
 function reconcileIndex() {
+  const startedAt = Date.now();
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(30000);
@@ -1430,8 +1431,13 @@ function reconcileIndex() {
     }
 
     autoResolvePendingCleanup(props); // 順手核銷「資料夾已刪」的待清理提醒,讓每日排程做的是全套同步
-    Logger.log('對帳完成:補登 ' + newRows.length + ' 筆、清除 ' + rowsToDelete.length + ' 筆失效紀錄。');
-    return { added: newRows.length, removed: rowsToDelete.length };
+    // 回報耗時:全樹掃描的時間會隨檔案數成長,單次執行超過 6 分鐘會被 Apps Script 直接中斷。
+    // 把耗時帶回前端顯示,是為了在真的撞到上限之前就看得出「愈跑愈久」的趨勢 ——
+    // 否則第一個徵兆就是同步整個壞掉。等它真的逼近上限再改成分批處理即可,現在不用預先複雜化。
+    const elapsedMs = Date.now() - startedAt;
+    Logger.log('對帳完成:補登 ' + newRows.length + ' 筆、清除 ' + rowsToDelete.length +
+      ' 筆失效紀錄,耗時 ' + (elapsedMs / 1000).toFixed(1) + ' 秒。');
+    return { added: newRows.length, removed: rowsToDelete.length, ms: elapsedMs };
   } finally {
     lock.releaseLock();
   }

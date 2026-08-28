@@ -44,6 +44,18 @@ function makeFolder(spec) {
   };
 }
 
+/** 假的 Drive 檔案 */
+function makeFile(spec) {
+  return {
+    getId: function () { return spec.id; },
+    getName: function () { return spec.name; },
+    getUrl: function () { return 'https://drive.google.com/file/d/' + spec.id + '/view'; },
+    getMimeType: function () { return spec.mimeType || 'image/jpeg'; },
+    getDateCreated: function () { return spec.createdAt || new Date('2026-07-20T10:00:00Z'); },
+    isTrashed: function () { return !!spec.trashed; }
+  };
+}
+
 /** 假的指令碼屬性儲存區(PropertiesService) */
 function makeProps(initial) {
   const store = Object.assign({}, initial);
@@ -72,7 +84,10 @@ function makeSheet(rows) {
             return r.slice(col - 1, col - 1 + numCols);
           });
         },
-        setValue: function () { /* 測試用不到 */ }
+        setValue: function () { /* 測試用不到 */ },
+        setValues: function (values) {
+          values.forEach(function (r, i) { rows[row - 2 + i] = r; });
+        }
       };
     },
     appendRow: function (r) { rows.push(r); },
@@ -196,6 +211,7 @@ module.exports = {
   loadCodeGs: loadCodeGs,
   toHost: toHost,
   makeFolder: makeFolder,
+  makeFile: makeFile,
   makeProps: makeProps,
   makeSheet: makeSheet,
   makeUrlFetchApp: makeUrlFetchApp,
