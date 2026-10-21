@@ -585,6 +585,19 @@
     setTimeout(function () { toastEl.classList.remove('show'); }, 2200);
   }
 
+  // localStorage 裡的內容可能壞掉(寫到一半被中斷、或被手動改過)。壞掉時退回預設值就好,
+  // 絕對不能在載入階段拋例外 —— 那會讓整個 App 連畫面都出不來,使用者只能清網站資料才救得回。
+  function readStoredJson(key, fallback) {
+    try {
+      var raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      var parsed = JSON.parse(raw);
+      return parsed === null ? fallback : parsed;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
   function isConfigured() {
     return !!(settings.gasUrl && settings.passKey);
   }
@@ -1162,7 +1175,7 @@
   // ---------- 課程清單 ----------
   var RECENT_THRESHOLD = 6; // 課程數超過這個數字才顯示「最近使用」跟搜尋框的必要性提高
   var currentCourses = [];
-  var currentCourseCategories = JSON.parse(localStorage.getItem('courseCategoriesCache') || '{}'); // {課程名: 分類}
+  var currentCourseCategories = readStoredJson('courseCategoriesCache', {}); // {課程名: 分類}
 
   function getRecency() {
     try { return JSON.parse(localStorage.getItem('courseRecency') || '{}'); }
@@ -1291,9 +1304,9 @@
         }
       })
       .catch(function () {
-        var cached = localStorage.getItem('coursesCache');
+        var cached = readStoredJson('coursesCache', null);
         if (cached) {
-          renderCourses(JSON.parse(cached));
+          renderCourses(cached);
           toast('離線中,使用上次的課程清單');
         } else {
           courseListEl.innerHTML = '<span class="empty">目前離線且無快取的課程清單</span>';
@@ -1353,6 +1366,9 @@
   function queueDelete(id) {
     return withStore('readwrite', function (store) { store.delete(id); });
   }
+  function queuePut(item) {
+    return withStore('readwrite', function (store) { store.put(item); });
+  }
   function queueAll() {
     return dbPromise.then(function (db) {
       return new Promise(function (resolve, reject) {
@@ -1404,7 +1420,10 @@
       name.textContent = (e.type === 'note' ? '📝 ' : (e.type === 'audio' ? '🎙️ ' : '📷 ')) + e.tag + ' · ' + e.time;
       var state = document.createElement('span');
       state.className = 'state ' + e.state;
-      state.textContent = e.state === 'ok' ? '已上傳' : e.state === 'pending' ? '排隊中' : '失敗,等重試(點我看原因)';
+      state.textContent = e.state === 'ok' ? '已上傳'
+        : e.state === 'pending' ? '排隊中'
+        : e.givenUp ? '已放棄(點我看原因)'
+        : '失敗,等重試(點我看原因)';
       if (e.state === 'err' && e.error) {
         state.style.cursor = 'pointer';
         state.title = e.error;
@@ -1418,19 +1437,30 @@
 
   function refreshQueueInfo() {
     queueAll().then(function (all) {
-      queueInfoEl.textContent = '佇列: ' + all.length;
+      var pending = all.filter(function (item) { return !item.givenUp; });
+      var givenUp = all.length - pending.length;
+      queueInfoEl.textContent = '佇列: ' + pending.length + (givenUp ? '(' + givenUp + ' 筆已放棄)' : '');
       statusRowEl.classList.toggle('warn', all.length > 0);
     });
   }
 
   var processing = false;
+  // 伺服器明確「拒絕」(資料有問題、金鑰錯誤之類)的項目,再送幾次也一樣會被拒絕。
+  // 以前這種項目會留在佇列裡每 20 秒重試一次、永遠不會停:佇列數字歸不了零、最近上傳被洗版,
+  // 還一直白燒後端配額。現在改成記失敗次數,到上限就標記放棄、不再自動重試
+  // (資料本身保留在佇列裡不刪掉,以免真的有東西想救卻已經沒了)。
+  // 「伺服器忙碌中」是暫時性的(剛好有別的操作在跑),不計入次數。
+  var QUEUE_MAX_FAILS = 3;
+  var QUEUE_BUSY_ERROR = 'server busy, please retry';
+
   function processQueue() {
     if (processing || !navigator.onLine || !isConfigured()) return;
     processing = true;
     queueAll().then(function (all) {
-      if (all.length === 0) { processing = false; return; }
+      var pending = all.filter(function (item) { return !item.givenUp; });
+      if (pending.length === 0) { processing = false; return; }
       var chain = Promise.resolve();
-      all.forEach(function (item) {
+      pending.forEach(function (item) {
         chain = chain.then(function () {
           return uploadItem(item)
             .then(function (res) {
@@ -1438,14 +1468,24 @@
                 return queueDelete(item.id).then(function () {
                   pushLog({ tag: item.tag, time: item.time, state: 'ok', type: item.type });
                 });
-              } else {
-                // 帶上後端回傳的實際錯誤原因,不然畫面上永遠只看得到「失敗」兩個字,
-                // 沒辦法知道是哪裡出問題(見 renderLog() 的點擊顯示)。
-                pushLog({ tag: item.tag, time: item.time, state: 'err', type: item.type, error: res.error || '未知錯誤' });
               }
+              // 帶上後端回傳的實際錯誤原因,不然畫面上永遠只看得到「失敗」兩個字,
+              // 沒辦法知道是哪裡出問題(見 renderLog() 的點擊顯示)。
+              var error = res.error || '未知錯誤';
+              if (error === QUEUE_BUSY_ERROR) {
+                pushLog({ tag: item.tag, time: item.time, state: 'err', type: item.type, error: '伺服器忙碌中,稍後會自動重試' });
+                return;
+              }
+              item.fails = (item.fails || 0) + 1;
+              var givenUp = item.fails >= QUEUE_MAX_FAILS;
+              if (givenUp) item.givenUp = true;
+              return queuePut(item).then(function () {
+                pushLog({ tag: item.tag, time: item.time, state: 'err', type: item.type, givenUp: givenUp, error: error });
+                if (givenUp) toast('有一筆上傳連續失敗,已停止重試,可在「最近上傳」點開看原因');
+              });
             })
             .catch(function () {
-              // 網路問題,留在佇列裡,之後自動重試
+              // 網路問題(fetch 本身就失敗),不是伺服器拒絕,不計入失敗次數,留著之後自動重試
             });
         });
       });
@@ -1661,10 +1701,57 @@
     noteEditor.innerHTML = activeCourse ? (localStorage.getItem(noteDraftKey(activeCourse)) || '') : '';
     renderChapterNav();
   }
+  // 草稿是「某一天 x 某一門課」各一把 key。不清理的話會無限累積,最後把 localStorage(約 5MB)
+  // 塞爆;塞爆之後 setItem 會拋例外,而這段又寫在打字事件裡,結果是「以為有存、其實早就沒在存」
+  // 的無聲失敗,分頁一關筆記就沒了。所以要定期清舊的,寫入也要防護。
+  var NOTE_DRAFT_KEEP_DAYS = 7;
+  var noteDraftQuotaWarned = false;
+
+  function stampDaysAgo(days) {
+    var d = new Date(Date.now() - days * 86400000);
+    return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+  }
+
+  // 回傳清掉幾筆。日期格式是 YYYYMMDD,字串比大小等同比時間先後,不用另外解析成日期。
+  function cleanupOldNoteDrafts() {
+    var cutoff = stampDaysAgo(NOTE_DRAFT_KEEP_DAYS);
+    var doomed = [];
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var key = localStorage.key(i);
+        if (!key || key.indexOf('noteDraft::') !== 0) continue;
+        var stamp = key.split('::')[1];
+        if (stamp && stamp < cutoff) doomed.push(key);
+      }
+      doomed.forEach(function (k) { localStorage.removeItem(k); });
+    } catch (e) { /* 清理失敗不影響主要流程 */ }
+    return doomed.length;
+  }
+
+  function saveNoteDraft() {
+    if (!activeCourse) return;
+    var key = noteDraftKey(activeCourse);
+    try {
+      localStorage.setItem(key, noteEditor.innerHTML);
+      noteDraftQuotaWarned = false;
+    } catch (e) {
+      // 多半是空間滿了:先清掉舊草稿再試一次,還是不行就明講,不要讓使用者誤以為有存到
+      cleanupOldNoteDrafts();
+      try {
+        localStorage.setItem(key, noteEditor.innerHTML);
+        noteDraftQuotaWarned = false;
+      } catch (e2) {
+        if (!noteDraftQuotaWarned) {
+          noteDraftQuotaWarned = true; // 每打一個字都跳會很吵,同一次滿載只提醒一次
+          toast('瀏覽器儲存空間已滿,草稿無法自動保存,請先按「儲存筆記」');
+        }
+      }
+    }
+  }
+
   noteEditor.addEventListener('input', function () {
     renderChapterNav();
-    if (!activeCourse) return;
-    localStorage.setItem(noteDraftKey(activeCourse), noteEditor.innerHTML);
+    saveNoteDraft();
   });
 
   // 取得目前編輯器裡的選取範圍;如果目前沒有選取在編輯器裡(例如剛載入頁面、還沒點進去打字),
@@ -1961,6 +2048,7 @@
   });
 
   // ---------- 啟動 ----------
+  cleanupOldNoteDrafts(); // 清掉過期草稿,避免長期累積把 localStorage 塞爆
   updateShootEnabled();
   updateNetInfo();
   refreshQueueInfo();
