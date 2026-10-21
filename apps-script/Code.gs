@@ -243,11 +243,24 @@ function extractFileId(url) {
  *   (無參數)                                 → 健康檢查,瀏覽器打開網址確認服務正常
  */
 function doGet(e) {
-  const action = e.parameter.action;
+  // 沒有這層的話,底下任何一個 action 丟例外,Apps Script 會回一頁 HTML 錯誤頁,
+  // 前端的 r.json() 跟著爆,最後一律顯示成「離線中」—— 真正的錯誤訊息完全看不到。
+  // doPost 當初就踩過同一個坑(reconcile 沒包 try/catch),這裡補齊同樣的防護。
+  try {
+    return routeGet(e);
+  } catch (err) {
+    return jsonResponse({ ok: false, error: String((err && err.message) || err) });
+  }
+}
+
+function routeGet(e) {
+  const action = (e && e.parameter) ? e.parameter.action : '';
   const props = PropertiesService.getScriptProperties();
 
+  const param = (e && e.parameter) ? e.parameter : {};
+
   if (action === 'courses') {
-    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+    if (param.passKey !== props.getProperty('PASS_KEY')) {
       return jsonResponse({ ok: false, error: 'unauthorized' });
     }
     const courses = JSON.parse(props.getProperty('COURSES') || '["未分類"]');
@@ -256,7 +269,7 @@ function doGet(e) {
   }
 
   if (action === 'pendingCleanup') {
-    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+    if (param.passKey !== props.getProperty('PASS_KEY')) {
       return jsonResponse({ ok: false, error: 'unauthorized' });
     }
     // 自我修復:App 每次抓提醒清單時,順手檢查一下資料夾是不是其實已經刪掉了(含丟進垃圾桶),
@@ -274,23 +287,23 @@ function doGet(e) {
   }
 
   if (action === 'listFiles') {
-    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+    if (param.passKey !== props.getProperty('PASS_KEY')) {
       return jsonResponse({ ok: false, error: 'unauthorized' });
     }
-    const files = getFilesForCourse(String(e.parameter.course || ''), props);
+    const files = getFilesForCourse(String(param.course || ''), props);
     return jsonResponse({ ok: true, files: files });
   }
 
   if (action === 'searchFiles') {
-    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+    if (param.passKey !== props.getProperty('PASS_KEY')) {
       return jsonResponse({ ok: false, error: 'unauthorized' });
     }
-    const files = searchFilesAcrossCourses(String(e.parameter.q || ''), props);
+    const files = searchFilesAcrossCourses(String(param.q || ''), props);
     return jsonResponse({ ok: true, files: files });
   }
 
   if (action === 'podcastJobStatus') {
-    if (e.parameter.passKey !== props.getProperty('PASS_KEY')) {
+    if (param.passKey !== props.getProperty('PASS_KEY')) {
       return jsonResponse({ ok: false, error: 'unauthorized' });
     }
     const job = getPodcastJob(props);
@@ -301,6 +314,9 @@ function doGet(e) {
         status: job.status,
         tag: job.tag,
         episodeTitle: job.episodeTitle,
+        // 給前端判斷「還在跑」還是「早就死了」用:背景工作如果中斷,狀態會一直停在
+        // downloading,沒有這個時間戳的話畫面會永遠顯示下載中、而且一直輪詢。
+        updatedAt: job.updatedAt,
         offset: job.offset,
         totalSize: job.totalSize,
         error: job.error,
@@ -1099,19 +1115,21 @@ function processPodcastJob() {
   const props = PropertiesService.getScriptProperties();
   const job = getPodcastJob(props);
   if (!job) return; // 沒有工作在進行
+  if (job.status !== 'downloading' && job.status !== 'finalizing') return; // 已經 done/error,沒有事要做
+
+  // 安全上限要同時涵蓋「下載」與「收尾」兩個階段。收尾如果一直搶不到鎖,會不斷重排觸發器,
+  // 沒有上限就是一個不會停、又只會默默燒配額的迴圈(先前只有下載階段有這道保護)。
+  const startedAgo = Date.now() - new Date(job.startedAt).getTime();
+  if (startedAgo > PODCAST_JOB_MAX_AGE_MS) {
+    job.status = 'error';
+    job.error = '處理時間超過安全上限(3 小時),已中止,請重新試一次';
+    savePodcastJob(job, props);
+    return;
+  }
 
   if (job.status === 'finalizing') {
     // 上一次接力卡在寫索引表那一步(通常是搶鎖失敗),直接重試
     finalizePodcastJob(job, props);
-    return;
-  }
-  if (job.status !== 'downloading') return; // 已經 done/error,沒有事要做
-
-  const startedAgo = Date.now() - new Date(job.startedAt).getTime();
-  if (startedAgo > PODCAST_JOB_MAX_AGE_MS) {
-    job.status = 'error';
-    job.error = '下載耗時超過安全上限(3 小時),已中止,請重新試一次';
-    savePodcastJob(job, props);
     return;
   }
 

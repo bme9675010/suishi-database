@@ -1583,6 +1583,7 @@
   // 「啟動」背景工作,馬上就會拿到回應;之後用 podcastJobStatus 這個 action 輪詢進度,
   // 用進度區塊取代原本輸入框的位置,工作結束(成功或失敗)才切回一般表單。
   var podcastPollTimer = null;
+  var PODCAST_STALE_MS = 10 * 60 * 1000; // 跟後端 PODCAST_JOB_STALE_MS 一致
 
   function showPodcastForm() {
     podcastFormEl.hidden = false;
@@ -1626,6 +1627,16 @@
         }
         var job = data.job;
         if (job.status === 'downloading' || job.status === 'finalizing') {
+          // 背景工作如果中斷(例如觸發器沒接上),狀態會一直停在 downloading。沒有這道判斷的話,
+          // 畫面會永遠顯示「背景下載中」並每 8 秒輪詢一次。門檻跟後端判定工作過期的標準一致,
+          // 所以這邊顯示成可以重貼網址時,後端也正好允許用新工作蓋掉它。
+          var idleMs = job.updatedAt ? (Date.now() - new Date(job.updatedAt).getTime()) : 0;
+          if (idleMs > PODCAST_STALE_MS) {
+            showPodcastForm();
+            stopPodcastPolling();
+            if (showToastOnFinish) toast('Podcast 背景下載似乎已中斷,請重新貼一次網址');
+            return;
+          }
           showPodcastProgress(job);
           startPodcastPolling();
         } else if (job.status === 'done') {
