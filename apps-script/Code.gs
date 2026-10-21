@@ -666,16 +666,20 @@ function scanInbox() {
   try {
     const props = PropertiesService.getScriptProperties();
     const inbox = DriveApp.getFolderById(props.getProperty('INBOX_FOLDER_ID'));
-    const files = inbox.getFiles();
 
-    while (files.hasNext()) {
-      const file = files.next();
+    // 先把清單整個收集起來再處理。歸檔會把檔案搬出收件夾,等於在走訪過程中變動同一個
+    // 資料夾的內容,迭代器可能因此跳過某些檔案(下一次排程雖然會補,但同一批就是會漏)。
+    const files = [];
+    const it = inbox.getFiles();
+    while (it.hasNext()) files.push(it.next());
+
+    files.forEach(function (file) {
       try {
         processInboxFile(file, props);
       } catch (err) {
         Logger.log('處理失敗: ' + file.getName() + ' - ' + err);
       }
-    }
+    });
   } finally {
     lock.releaseLock();
   }

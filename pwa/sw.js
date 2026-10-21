@@ -1,4 +1,7 @@
-const CACHE_NAME = 'suishi-db-v1';
+// 快取名稱改版時,舊的會在 activate 階段被整個刪掉。
+// v2:之前的版本會連 Apps Script 的 API 回應一起快取(見下方 fetch 處理的說明),
+// 換名字可以順便把那些不該留下的舊快取清乾淨。
+const CACHE_NAME = 'suishi-db-v2';
 const SHELL = ['./index.html', './manifest.json'];
 
 self.addEventListener('install', (event) => {
@@ -21,6 +24,15 @@ self.addEventListener('activate', (event) => {
 // 但離線時仍能把 App 本體打開(佇列上傳邏輯本身另外處理)。
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+
+  // 只處理自己網站的靜態檔案。跟 Apps Script 後端溝通的 courses / listFiles /
+  // searchFiles / podcastJobStatus 也都是 GET,但絕對不能快取:
+  //   1. 離線時會回傳上次的舊資料、而且是 200,App 的離線處理完全不會觸發,
+  //      畫面會顯示過期內容卻看起來像即時的
+  //   2. 通行金鑰是放在查詢字串裡的,整個網址會連同金鑰一起被存進 Cache Storage
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
+
   event.respondWith(
     fetch(event.request)
       .then((res) => {

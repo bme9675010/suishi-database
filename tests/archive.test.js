@@ -144,6 +144,72 @@ test('歸檔會把新課程自動補進課程清單', () => {
   assert.ok(JSON.parse(ctx.props.getProperty('COURSES')).indexOf('全新的課') !== -1);
 });
 
+// ---------------- scanInbox:走訪收件夾 ----------------
+
+test('scanInbox:收件夾裡每個檔案都要被處理到,不會因為邊走訪邊搬而漏掉', () => {
+  // 真實的 Drive 行為:檔案一旦被搬出收件夾,就不在該資料夾的清單裡了。
+  // 「邊走訪邊搬」碰到這種情況會跳號 —— 處理完第 1 個,第 2 個就被跳過。
+  // 所以必須先把清單整個收集起來再處理。
+  const live = [];
+  const inbox = {
+    getId: function () { return INBOX_ID; },
+    getName: function () { return '_收件夾'; },
+    isTrashed: function () { return false; },
+    getFiles: function () {
+      let i = 0;
+      return {
+        hasNext: function () { return i < live.length; },
+        next: function () { return live[i++]; }
+      };
+    }
+  };
+
+  function inboxFile(id, name) {
+    const spec = { id: id, name: name, mimeType: 'audio/mp4' };
+    const file = {
+      getId: function () { return spec.id; },
+      getName: function () { return spec.name; },
+      getUrl: function () { return 'https://drive.google.com/file/d/' + spec.id + '/view'; },
+      getMimeType: function () { return spec.mimeType; },
+      getDateCreated: function () { return new Date('2026-07-20T10:00:00Z'); },
+      isTrashed: function () { return false; },
+      setName: function (n) { spec.name = n; return file; },
+      setTrashed: function () { return file; },
+      moveTo: function () {
+        const idx = live.indexOf(file); // 搬走之後就不在收件夾清單裡了
+        if (idx >= 0) live.splice(idx, 1);
+        return file;
+      },
+      _spec: spec
+    };
+    return file;
+  }
+
+  live.push(inboxFile('f1', 'A課.m4a'), inboxFile('f2', 'B課.m4a'), inboxFile('f3', 'C課.m4a'));
+
+  const root = makeFolder({ name: '隨時資料庫', folders: [inbox] });
+  const sheet = makeSheet([]);
+  const props = makeProps({
+    ROOT_FOLDER_ID: 'root-id',
+    INBOX_FOLDER_ID: INBOX_ID,
+    SHEET_ID: 'sheet-id',
+    COURSES: JSON.stringify(['未分類']),
+    PENDING_CLEANUP: '[]'
+  });
+  const env = loadCodeGs({
+    PropertiesService: { getScriptProperties: () => props },
+    LockService: { getScriptLock: () => ({ waitLock: () => true, releaseLock: () => {} }) },
+    DriveApp: { getFolderById: (id) => (id === INBOX_ID ? inbox : root) },
+    SpreadsheetApp: { openById: () => ({ getSheetByName: () => sheet }) }
+  });
+
+  env.scanInbox();
+
+  assert.strictEqual(sheet._rows.length, 3, '三個檔案都該被歸檔,一個都不能漏');
+  assert.deepStrictEqual(sheet._rows.map((r) => r[2]).sort(), ['A課', 'B課', 'C課']);
+  assert.strictEqual(live.length, 0, '處理完收件夾應該是空的');
+});
+
 // ---------------- 重送偵測(避免同一份檔案被歸檔兩次)----------------
 
 test('重送偵測:記錄過的識別碼會被認出來', () => {

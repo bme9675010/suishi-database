@@ -112,6 +112,7 @@
     font-size: 13px; color: var(--muted); margin-top: 10px;
   }
   .status-row.warn { color: #fbbf24; }
+  #queueInfo.has-given-up { text-decoration: underline; cursor: pointer; }
 
   .course-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
   .hint-text { font-size: 11px; color: var(--muted); margin: 8px 0 0; line-height: 1.5; }
@@ -506,6 +507,19 @@
   </div>
 </dialog>
 
+<dialog id="givenUpDialog">
+  <div class="dialog-body">
+    <h3>已停止重試的項目</h3>
+    <ul class="browse-course-list" id="givenUpList"></ul>
+    <p class="hint-text">這些項目連續失敗多次,已經停止自動重試(資料還留著,沒有被刪掉)。如果造成失敗的原因已經排除(例如重新授權、改好連線設定),可以整批重試;確定不要了就刪除。</p>
+    <div class="dialog-actions">
+      <button id="closeGivenUp">關閉</button>
+      <button id="deleteGivenUp">全部刪除</button>
+      <button class="primary" id="retryGivenUp">全部重試</button>
+    </div>
+  </div>
+</dialog>
+
 <div id="toast"></div>
 
 <script>
@@ -522,6 +536,8 @@
   var shootBtn = document.getElementById('shootBtn');
   var cameraInput = document.getElementById('cameraInput');
   var queueInfoEl = document.getElementById('queueInfo');
+  var givenUpDialog = document.getElementById('givenUpDialog');
+  var givenUpListEl = document.getElementById('givenUpList');
   var netInfoEl = document.getElementById('netInfo');
   var statusRowEl = document.getElementById('statusRow');
   var logListEl = document.getElementById('logList');
@@ -1360,6 +1376,73 @@
     });
   }
 
+  // 連續失敗被標記放棄的項目:資料保留著不刪,但也要有地方可以處理它,
+  // 否則「佇列: 0(N 筆已放棄)」會永遠掛在畫面上,只能清網站資料才消得掉。
+  queueInfoEl.addEventListener('click', function () {
+    if (!queueInfoEl.classList.contains('has-given-up')) return;
+    openGivenUpDialog();
+  });
+  document.getElementById('closeGivenUp').addEventListener('click', function () {
+    givenUpDialog.close();
+  });
+
+  function openGivenUpDialog() {
+    givenUpListEl.innerHTML = '<li class="empty">載入中…</li>';
+    givenUpDialog.showModal();
+    queueAll().then(function (all) {
+      var items = all.filter(function (item) { return item.givenUp; });
+      if (items.length === 0) {
+        givenUpListEl.innerHTML = '<li class="empty">目前沒有已停止重試的項目</li>';
+        return;
+      }
+      givenUpListEl.innerHTML = '';
+      items.forEach(function (item) {
+        var li = document.createElement('li');
+        var row = document.createElement('div');
+        row.style.padding = '10px 0';
+        var title = document.createElement('div');
+        title.textContent = (item.type === 'note' ? '📝 ' : (item.type === 'audio' ? '🎙️ ' : '📷 ')) +
+          item.tag + ' · ' + item.time;
+        var reason = document.createElement('div');
+        reason.className = 'hint-text';
+        reason.style.margin = '2px 0 0';
+        reason.textContent = '失敗 ' + (item.fails || 0) + ' 次';
+        row.appendChild(title);
+        row.appendChild(reason);
+        li.appendChild(row);
+        givenUpListEl.appendChild(li);
+      });
+    });
+  }
+
+  function forEachGivenUp(handle, doneMessage) {
+    return queueAll().then(function (all) {
+      var items = all.filter(function (item) { return item.givenUp; });
+      return Promise.all(items.map(handle)).then(function () {
+        givenUpDialog.close();
+        refreshQueueInfo();
+        toast(doneMessage.replace('{n}', items.length));
+      });
+    });
+  }
+
+  document.getElementById('retryGivenUp').addEventListener('click', function () {
+    forEachGivenUp(function (item) {
+      delete item.givenUp;   // 放回正常佇列,失敗次數歸零重新算
+      item.fails = 0;
+      return queuePut(item);
+    }, '已把 {n} 筆放回佇列重試').then(function () {
+      processQueue(); // 放回佇列後立刻跑一次,不用等下一輪
+    });
+  });
+
+  document.getElementById('deleteGivenUp').addEventListener('click', function () {
+    if (!confirm('確定要刪除這些已停止重試的項目嗎?刪掉之後就救不回來了。')) return;
+    forEachGivenUp(function (item) {
+      return queueDelete(item.id);
+    }, '已刪除 {n} 筆');
+  });
+
   // 每筆上傳的唯一識別碼。伺服器歸檔成功但回應在網路上掉了時,手機會重送;
   // 後端靠這個識別碼認出「這筆剛剛已經處理過」,直接回成功而不是再建一份重複檔案。
   function newClientId() {
@@ -1447,7 +1530,8 @@
     queueAll().then(function (all) {
       var pending = all.filter(function (item) { return !item.givenUp; });
       var givenUp = all.length - pending.length;
-      queueInfoEl.textContent = '佇列: ' + pending.length + (givenUp ? '(' + givenUp + ' 筆已放棄)' : '');
+      queueInfoEl.textContent = '佇列: ' + pending.length + (givenUp ? '(' + givenUp + ' 筆已放棄,點我處理)' : '');
+      queueInfoEl.classList.toggle('has-given-up', givenUp > 0);
       statusRowEl.classList.toggle('warn', all.length > 0);
     });
   }
