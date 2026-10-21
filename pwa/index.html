@@ -1360,6 +1360,13 @@
     });
   }
 
+  // 每筆上傳的唯一識別碼。伺服器歸檔成功但回應在網路上掉了時,手機會重送;
+  // 後端靠這個識別碼認出「這筆剛剛已經處理過」,直接回成功而不是再建一份重複檔案。
+  function newClientId() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return 'cid-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
   function queueAdd(item) {
     return withStore('readwrite', function (store) { store.add(item); });
   }
@@ -1392,7 +1399,8 @@
           mimeType: item.mimeType,
           base64Data: item.base64Data,
           tag: item.tag,
-          type: item.type || 'photo'
+          type: item.type || 'photo',
+          clientId: item.clientId
         };
     return fetch(settings.gasUrl, {
       method: 'POST',
@@ -1515,7 +1523,8 @@
         base64Data: base64Data,
         tag: activeCourse || '未分類',
         time: stamp,
-        type: 'photo'
+        type: 'photo',
+        clientId: newClientId()
       };
       queueAdd(item).then(function () {
         pushLog({ tag: item.tag, time: item.time, state: 'pending', type: item.type });
@@ -1562,7 +1571,8 @@
         base64Data: base64Data,
         tag: activeCourse,
         time: stamp,
-        type: 'audio'
+        type: 'audio',
+        clientId: newClientId()
       };
       queueAdd(item).then(function () {
         pushLog({ tag: item.tag, time: item.time, state: 'pending', type: item.type });
@@ -1763,6 +1773,28 @@
   noteEditor.addEventListener('input', function () {
     renderChapterNav();
     saveNoteDraft();
+  });
+
+  // contenteditable 預設會把來源的整包 HTML 貼進來,有兩個實際的壞處:
+  //   1. 貼圖片會變成 data URI(一張截圖可能好幾 MB)直接塞進草稿,把 localStorage 撐爆
+  //   2. extractNoteBlocks 不處理 <img>、表格、清單,存檔時這些內容會無聲消失 ——
+  //      畫面上看得到,存進 Google 文件卻沒了,是最難察覺的那種資料遺失
+  // 這個編輯器只支援自己的四種格式(粗體/斜體/螢光筆/字色),保留外來格式沒有意義,
+  // 一律轉成純文字最誠實:看到什麼就會存到什麼。
+  noteEditor.addEventListener('paste', function (e) {
+    var clip = e.clipboardData || window.clipboardData;
+    if (!clip) return;
+    e.preventDefault();
+    var text = clip.getData('text/plain');
+    if (!text) return;
+    // insertText 會保留瀏覽器原生的復原紀錄,也會照常觸發 input 事件(草稿自動存檔靠它)
+    if (!document.execCommand('insertText', false, text)) {
+      var range = getEditorRange();
+      range.deleteContents();
+      range.insertNode(document.createTextNode(text));
+      range.collapse(false);
+      noteEditor.dispatchEvent(new Event('input'));
+    }
   });
 
   // 取得目前編輯器裡的選取範圍;如果目前沒有選取在編輯器裡(例如剛載入頁面、還沒點進去打字),

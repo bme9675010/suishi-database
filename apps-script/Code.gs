@@ -475,12 +475,19 @@ function doPost(e) {
       return jsonResponse({ ok: false, error: 'missing base64Data or filename' });
     }
 
+    if (wasUploadProcessed(body.clientId, props)) {
+      // 這筆其實上次已經歸檔成功了,只是回應沒回到手機所以被重送。直接回成功讓手機把它
+      // 從佇列移除,不要再建一份重複的檔案。
+      return jsonResponse({ ok: true, duplicate: true });
+    }
+
     const bytes = Utilities.base64Decode(body.base64Data);
     const blob = Utilities.newBlob(bytes, body.mimeType || 'application/octet-stream', body.filename);
     // type 只接受這三種已知值,其他一律當拍照處理(避免呼叫端傳奇怪字串建出非預期的資料夾)
     const uploadType = (body.type === 'note' || body.type === 'audio') ? body.type : 'photo';
 
     const result = fileIntoLibrary(blob, uploadType, body.tag || '未分類', 'PWA');
+    rememberUploadProcessed(body.clientId, props);
     return jsonResponse({ ok: true, url: result.url, name: result.name });
   } catch (err) {
     return jsonResponse({ ok: false, error: String(err) });
@@ -560,6 +567,16 @@ function handleSetCourseCategory(body, props) {
     const existingCourseFolder = oldParent ? findActiveFolder(oldParent, actualName) : null;
     if (existingCourseFolder) {
       const newParent = category ? getOrCreateFolder(root, category) : root;
+      // 目的地若已經有同名資料夾(例如之前手動建過),搬過去會變成兩個同名資料夾並存,
+      // 之後 getFoldersByName 取到哪一個並不確定,檔案會被拆到兩邊而且很難察覺。
+      // 這種情況直接擋下來,讓使用者先去 Drive 處理,不要默默製造出難以回復的狀態。
+      const clash = findActiveFolder(newParent, actualName);
+      if (clash && clash.getId() !== existingCourseFolder.getId()) {
+        return jsonResponse({
+          ok: false,
+          error: '目的地已經有一個叫「' + actualName + '」的資料夾,請先到 Drive 把兩邊合併或改名,再回來設定分類'
+        });
+      }
       existingCourseFolder.moveTo(newParent);
     }
 
@@ -682,10 +699,8 @@ function processInboxFile(file, props) {
   if (mime.indexOf('image/') === 0) type = 'photo';
   else if (mime.indexOf('audio/') === 0 || mime.indexOf('video/') === 0) type = 'audio';
 
-  const blob = file.getBlob();
-  fileIntoLibrary(blob, type, tag, '手機同步');
-
-  file.setTrashed(true);
+  // 檔案本來就在 Drive 裡,直接搬移即可 —— 不要讀成 blob 再複製一份(見 moveFileIntoLibrary)
+  moveFileIntoLibrary(file, type, tag, '手機同步');
 }
 
 /**
@@ -776,8 +791,37 @@ function registerCourseIfNew(tag, props) {
  * 本來就有、但一直沒用到的「備註」欄,不影響檔名規則(檔名還是統一格式,不會因為標題
  * 很長或含特殊字元跑掉)。
  */
-function fileIntoLibrary(blob, type, tag, source, note) {
-  const props = PropertiesService.getScriptProperties();
+// 手機端每筆上傳都會帶一個隨機識別碼。如果伺服器已經歸檔成功、但回應在網路上掉了,
+// 手機會以為失敗而重送 —— 沒有這道防線的話 Drive 就會多出一份一模一樣的檔案。
+// 只保留最近幾筆:這是用來擋「剛剛那次重送」,不需要永久保存,而且 PropertiesService
+// 單一屬性有大小上限,不能無限成長。
+const PROCESSED_UPLOADS_PROP = 'PROCESSED_UPLOADS';
+const PROCESSED_UPLOADS_KEEP = 100;
+
+function wasUploadProcessed(clientId, props) {
+  if (!clientId) return false;
+  const ids = JSON.parse(props.getProperty(PROCESSED_UPLOADS_PROP) || '[]');
+  return ids.indexOf(clientId) !== -1;
+}
+
+function rememberUploadProcessed(clientId, props) {
+  if (!clientId) return;
+  const ids = JSON.parse(props.getProperty(PROCESSED_UPLOADS_PROP) || '[]');
+  ids.push(clientId);
+  props.setProperty(PROCESSED_UPLOADS_PROP, JSON.stringify(ids.slice(-PROCESSED_UPLOADS_KEEP)));
+}
+
+function extensionOf(name) {
+  const n = String(name || '');
+  return n.indexOf('.') >= 0 ? n.split('.').pop() : '';
+}
+
+/**
+ * 算出歸檔的目的地資料夾與統一檔名。fileIntoLibrary()(用 blob 建新檔)跟
+ * moveFileIntoLibrary()(搬既有檔案)共用這段,確保兩條路的資料夾結構、
+ * 命名規則完全一致,不會改了一邊忘了另一邊。
+ */
+function prepareArchiveSlot(type, tag, ext, props) {
   const root = DriveApp.getFolderById(props.getProperty('ROOT_FOLDER_ID'));
   const now = new Date();
 
@@ -793,17 +837,42 @@ function fileIntoLibrary(blob, type, tag, source, note) {
   const typeFolder = getOrCreateFolder(monthFolder, typeFolderName);
 
   const stamp = Utilities.formatDate(now, 'Asia/Taipei', 'yyyyMMdd_HHmm');
-  const originalName = blob.getName() || '';
-  const ext = originalName.indexOf('.') >= 0 ? originalName.split('.').pop() : '';
   const newName = typeFolderName + '_' + stamp + '_' + safeTag + (ext ? '.' + ext : '');
-  blob.setName(newName);
+  return { now: now, typeFolder: typeFolder, typeFolderName: typeFolderName, safeTag: safeTag, newName: newName };
+}
 
-  const file = typeFolder.createFile(blob);
-
+function writeIndexRow(slot, fileUrl, source, note, props) {
   const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
-  sheet.appendRow([now, typeFolderName, safeTag, newName, file.getUrl(), source, note || '']);
+  sheet.appendRow([slot.now, slot.typeFolderName, slot.safeTag, slot.newName, fileUrl, source, note || '']);
+}
 
-  return { url: file.getUrl(), name: newName };
+/**
+ * 給「還不存在於 Drive」的內容用(PWA 直傳的照片/短音檔):用 blob 建立新檔案。
+ */
+function fileIntoLibrary(blob, type, tag, source, note) {
+  const props = PropertiesService.getScriptProperties();
+  const slot = prepareArchiveSlot(type, tag, extensionOf(blob.getName()), props);
+  blob.setName(slot.newName);
+  const file = slot.typeFolder.createFile(blob);
+  writeIndexRow(slot, file.getUrl(), source, note, props);
+  return { url: file.getUrl(), name: slot.newName };
+}
+
+/**
+ * 給「已經在 Drive 裡」的檔案用(收件夾歸檔):直接改名 + 搬移,不經過 blob。
+ *
+ * 以前這條路是 getBlob() 把整個檔案讀進記憶體、createFile() 複製一份、再把原檔丟垃圾桶。
+ * 代價是:歸檔瞬間同一份內容在 Drive 佔兩倍空間,而垃圾桶的檔案預設還要 30 天才會自動清掉
+ * (免費空間只有 15GB,很有感);整堂課的錄音動輒 60~150MB,也很接近 Apps Script 對 blob
+ * 的大小上限。搬移則是單純的中繼資料操作:不吃記憶體、不複製、瞬間完成、不留垃圾桶殘影。
+ */
+function moveFileIntoLibrary(file, type, tag, source, note) {
+  const props = PropertiesService.getScriptProperties();
+  const slot = prepareArchiveSlot(type, tag, extensionOf(file.getName()), props);
+  file.setName(slot.newName);
+  file.moveTo(slot.typeFolder);
+  writeIndexRow(slot, file.getUrl(), source, note, props);
+  return { url: file.getUrl(), name: slot.newName };
 }
 
 function getOrCreateFolder(parent, name) {

@@ -40,19 +40,102 @@ function makeFolder(spec) {
       const child = makeFolder({ name: name });
       folders.push(child);
       return child;
-    }
+    },
+    getFilesByName: function (name) {
+      return iterator(files.filter(function (f) { return f.getName() === name; }));
+    },
+    createFile: function (blob) {
+      const created = makeFile({ id: 'created-' + files.length, name: blob.getName ? blob.getName() : 'created' });
+      created._fromBlob = blob;
+      files.push(created);
+      return created;
+    },
+    addFile: function (f) { files.push(f); },
+    // 資料夾也會被搬動(課程指定分類時),同樣把動作記錄下來供斷言
+    moveTo: function (folder) { spec.movedTo = folder; return this; },
+    setName: function (n) { spec.name = n; return this; },
+    _spec: spec,
+    removeFile: function (f) {
+      const i = files.indexOf(f);
+      if (i >= 0) files.splice(i, 1);
+    },
+    _files: files,
+    _folders: folders
   };
 }
 
-/** 假的 Drive 檔案 */
+/**
+ * 假的 Drive 檔案。改名 / 搬移 / 丟垃圾桶都會記錄下來(movedTo、trashed、name),
+ * 測試才能驗證「收件夾歸檔是搬移,不是複製後丟垃圾桶」。
+ */
 function makeFile(spec) {
-  return {
+  const api = {
     getId: function () { return spec.id; },
     getName: function () { return spec.name; },
     getUrl: function () { return 'https://drive.google.com/file/d/' + spec.id + '/view'; },
     getMimeType: function () { return spec.mimeType || 'image/jpeg'; },
     getDateCreated: function () { return spec.createdAt || new Date('2026-07-20T10:00:00Z'); },
-    isTrashed: function () { return !!spec.trashed; }
+    isTrashed: function () { return !!spec.trashed; },
+    setName: function (n) { spec.name = n; return api; },
+    setTrashed: function (v) { spec.trashed = !!v; return api; },
+    moveTo: function (folder) { spec.movedTo = folder; return api; },
+    getBlob: function () {
+      spec.blobRead = true; // 讀成 blob 代表「整個檔案進記憶體」,大檔案要避免
+      return { getName: function () { return spec.name; }, setName: function (n) { spec.name = n; } };
+    },
+    _spec: spec
+  };
+  return api;
+}
+
+/** 假的 Google 文件,記錄 writeNoteBlocks 實際寫了什麼,供斷言用 */
+function makeDocument(id) {
+  const paragraphs = [];
+
+  function makeParagraph() {
+    const state = { heading: null, text: '', ops: [] };
+    const textApi = {
+      setText: function (t) { state.text = t; return textApi; },
+      insertText: function (offset, t) {
+        state.text = state.text.slice(0, offset) + t + state.text.slice(offset);
+        return textApi;
+      },
+      setBold: function (a, b, v) { state.ops.push(['bold', a, b, v]); return textApi; },
+      setItalic: function (a, b, v) { state.ops.push(['italic', a, b, v]); return textApi; },
+      setBackgroundColor: function (a, b, v) { state.ops.push(['bg', a, b, v]); return textApi; },
+      setForegroundColor: function (a, b, v) { state.ops.push(['fg', a, b, v]); return textApi; }
+    };
+    return {
+      _state: state,
+      setHeading: function (h) { state.heading = h; return this; },
+      editAsText: function () { return textApi; }
+    };
+  }
+
+  const body = {
+    clear: function () { paragraphs.length = 0; paragraphs.push(makeParagraph()); return body; },
+    appendParagraph: function () {
+      const para = makeParagraph();
+      paragraphs.push(para);
+      return para;
+    },
+    getNumChildren: function () { return paragraphs.length; },
+    getChild: function (i) { return paragraphs[i]; },
+    removeChild: function (child) {
+      const i = paragraphs.indexOf(child);
+      if (i >= 0) paragraphs.splice(i, 1);
+      return body;
+    }
+  };
+
+  return {
+    _paragraphs: paragraphs,
+    getId: function () { return id; },
+    getBody: function () { return body; },
+    saveAndClose: function () {},
+    dump: function () {
+      return paragraphs.map(function (p) { return p._state; });
+    }
   };
 }
 
@@ -157,7 +240,18 @@ function loadCodeGs(overrides) {
         return { _content: content, _type: type, _name: name, setName: function (n) { this._name = n; } };
       },
       getUuid: function () { return 'test-uuid'; },
-      formatDate: function () { return '20260101_0000'; },
+      // 要真的照格式字串輸出,否則像「筆記_年月日_課程」這種用多次 formatDate 組出來的
+      // 檔名會變成一坨相同字串,測試就測不到真正的命名規則了
+      formatDate: function (date, tz, pattern) {
+        const d = date instanceof Date ? date : new Date(date);
+        const pad = function (n) { return String(n).padStart(2, '0'); };
+        return String(pattern)
+          .replace(/yyyy/g, String(d.getFullYear()))
+          .replace(/MM/g, pad(d.getMonth() + 1))
+          .replace(/dd/g, pad(d.getDate()))
+          .replace(/HH/g, pad(d.getHours()))
+          .replace(/mm/g, pad(d.getMinutes()));
+      },
       base64Decode: function () { return []; }
     },
     DriveApp: notStubbed('DriveApp'),
@@ -212,6 +306,7 @@ module.exports = {
   toHost: toHost,
   makeFolder: makeFolder,
   makeFile: makeFile,
+  makeDocument: makeDocument,
   makeProps: makeProps,
   makeSheet: makeSheet,
   makeUrlFetchApp: makeUrlFetchApp,
