@@ -74,6 +74,7 @@ function makeFile(spec) {
     getName: function () { return spec.name; },
     getUrl: function () { return 'https://drive.google.com/file/d/' + spec.id + '/view'; },
     getMimeType: function () { return spec.mimeType || 'image/jpeg'; },
+    getSize: function () { return spec.size === undefined ? 1024 : spec.size; },
     getDateCreated: function () { return spec.createdAt || new Date('2026-07-20T10:00:00Z'); },
     isTrashed: function () { return !!spec.trashed; },
     setName: function (n) { spec.name = n; return api; },
@@ -167,9 +168,15 @@ function makeSheet(rows) {
             return r.slice(col - 1, col - 1 + numCols);
           });
         },
-        setValue: function () { /* 測試用不到 */ },
+        setValue: function (v) {
+          const target = rows[row - 2] || (rows[row - 2] = []);
+          target[col - 1] = v;
+        },
         setValues: function (values) {
-          values.forEach(function (r, i) { rows[row - 2 + i] = r; });
+          values.forEach(function (r, i) {
+            const target = rows[row - 2 + i] || (rows[row - 2 + i] = []);
+            r.forEach(function (v, j) { target[col - 1 + j] = v; });
+          });
         }
       };
     },

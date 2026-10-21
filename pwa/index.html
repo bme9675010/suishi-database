@@ -249,6 +249,25 @@
     padding: 5px 10px; border-radius: 8px; font-size: 12px; cursor: pointer;
   }
 
+  .storage-summary { font-size: 13px; line-height: 1.7; margin-bottom: 12px; }
+  .storage-bar {
+    height: 10px; border-radius: 5px; background: #0f172a; border: 1px solid var(--border);
+    overflow: hidden; display: flex; margin: 6px 0;
+  }
+  .storage-bar .used { background: var(--accent); height: 100%; }
+  .storage-bar .trash { background: #fbbf24; height: 100%; }
+  .storage-note { color: var(--muted); font-size: 11px; }
+  .storage-warn { color: #fbbf24; }
+  ul.cleanup-pick { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow-y: auto; }
+  ul.cleanup-pick li {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  ul.cleanup-pick li:last-child { border-bottom: none; }
+  ul.cleanup-pick .pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  ul.cleanup-pick .pick-size { flex-shrink: 0; color: var(--muted); font-size: 11px; }
+  ul.cleanup-pick input[type=checkbox] { width: auto; flex-shrink: 0; }
+
   .browse-type-filter { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
   .browse-type-chip {
     border: 1px solid var(--border); background: transparent; color: var(--text);
@@ -421,6 +440,8 @@
   <span class="footer-dot">·</span>
   <button class="settings-link" id="openSearch">全域搜尋</button>
   <span class="footer-dot">·</span>
+  <button class="settings-link" id="openStorage">空間管理</button>
+  <span class="footer-dot">·</span>
   <button class="settings-link" id="openSettings">連線設定</button>
 </div>
 
@@ -503,6 +524,25 @@
     <ul class="browse-course-list" id="searchResultList"></ul>
     <div class="dialog-actions">
       <button id="closeSearch">關閉</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="storageDialog">
+  <div class="dialog-body">
+    <h3>空間管理</h3>
+    <div class="storage-summary" id="storageSummary">讀取中…</div>
+    <div class="browse-type-filter" id="cleanupTypeFilter">
+      <button type="button" class="browse-type-chip active" data-type="Podcast">🎧 Podcast</button>
+      <button type="button" class="browse-type-chip" data-type="錄音">🎙️ 錄音</button>
+      <button type="button" class="browse-type-chip" data-type="照片">📷 照片</button>
+      <button type="button" class="browse-type-chip" data-type="文件">📄 文件</button>
+    </div>
+    <ul class="cleanup-pick" id="cleanupPickList"></ul>
+    <p class="hint-text" id="cleanupHint">清理會把檔案丟到 Drive 垃圾桶,索引紀錄(標題、課程、來源連結)會保留下來。Podcast 之後還能用來源連結重新封存,其他類型刪掉就沒了,請斟酌。</p>
+    <div class="dialog-actions">
+      <button id="closeStorage">關閉</button>
+      <button class="primary" id="doCleanup" disabled>清理所選</button>
     </div>
   </div>
 </dialog>
@@ -1026,6 +1066,211 @@
       return '';
     }
   }
+
+  // ---------- 空間管理 ----------
+  var storageDialog = document.getElementById('storageDialog');
+  var storageSummaryEl = document.getElementById('storageSummary');
+  var cleanupTypeFilterEl = document.getElementById('cleanupTypeFilter');
+  var cleanupPickListEl = document.getElementById('cleanupPickList');
+  var doCleanupBtn = document.getElementById('doCleanup');
+  var currentCleanupType = 'Podcast';
+
+  function formatBytes(n) {
+    n = Number(n) || 0;
+    if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1) + ' GB';
+    if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(0) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(0) + ' KB';
+    return n + ' B';
+  }
+
+  var TYPE_ICON = { 'Podcast': '🎧', '錄音': '🎙️', '照片': '📷', '筆記': '📝', '文件': '📄' };
+
+  document.getElementById('openStorage').addEventListener('click', function () {
+    if (!isConfigured()) { toast('請先填寫連線設定'); return; }
+    currentCleanupType = 'Podcast';
+    Array.prototype.forEach.call(cleanupTypeFilterEl.children, function (chip) {
+      chip.classList.toggle('active', chip.dataset.type === 'Podcast');
+    });
+    storageSummaryEl.textContent = '讀取中…';
+    cleanupPickListEl.innerHTML = '<li class="empty">讀取中…</li>';
+    updateCleanupButton();
+    storageDialog.showModal();
+    loadStorageSummary();
+    loadCleanupList();
+  });
+  document.getElementById('closeStorage').addEventListener('click', function () {
+    storageDialog.close();
+  });
+
+  Array.prototype.forEach.call(cleanupTypeFilterEl.children, function (chip) {
+    chip.addEventListener('click', function () {
+      currentCleanupType = chip.dataset.type;
+      Array.prototype.forEach.call(cleanupTypeFilterEl.children, function (c) { c.classList.toggle('active', c === chip); });
+      loadCleanupList();
+    });
+  });
+
+  function loadStorageSummary() {
+    fetch(settings.gasUrl + '?action=storage&passKey=' + encodeURIComponent(settings.passKey))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.ok) { storageSummaryEl.textContent = '讀取失敗:' + (data.error || '未知錯誤'); return; }
+        renderStorageSummary(data.quota, data.library);
+      })
+      .catch(function () { storageSummaryEl.textContent = '離線中,無法讀取空間狀況'; });
+  }
+
+  function renderStorageSummary(quota, library) {
+    storageSummaryEl.innerHTML = '';
+
+    var line1 = document.createElement('div');
+    if (quota.limit) {
+      line1.textContent = 'Drive:已用 ' + formatBytes(quota.usage) + ' / ' + formatBytes(quota.limit) +
+        '(剩 ' + formatBytes(Math.max(0, quota.limit - quota.usage)) + ')';
+    } else {
+      line1.textContent = 'Drive:已用 ' + formatBytes(quota.usage) + '(此帳號沒有容量上限)';
+    }
+    storageSummaryEl.appendChild(line1);
+
+    if (quota.limit) {
+      var bar = document.createElement('div');
+      bar.className = 'storage-bar';
+      var used = document.createElement('div');
+      used.className = 'used';
+      used.style.width = Math.min(100, (quota.usage / quota.limit) * 100) + '%';
+      bar.appendChild(used);
+      storageSummaryEl.appendChild(bar);
+    }
+
+    if (quota.trash) {
+      var trashLine = document.createElement('div');
+      trashLine.className = 'storage-note storage-warn';
+      // 這是最容易誤會的地方:刪檔案只是丟垃圾桶,不清空的話空間根本沒有釋放
+      trashLine.textContent = '垃圾桶佔了 ' + formatBytes(quota.trash) +
+        ' — 要到 Drive 清空垃圾桶,空間才會真的釋放(30 天後也會自動清)';
+      storageSummaryEl.appendChild(trashLine);
+    }
+
+    var types = Object.keys(library.byType || {}).filter(function (t) { return library.byType[t] > 0; });
+    types.sort(function (a, b) { return library.byType[b] - library.byType[a]; });
+    var detail = types.map(function (t) {
+      return (TYPE_ICON[t] || '') + ' ' + t + ' ' + formatBytes(library.byType[t]);
+    }).join('・');
+
+    var line2 = document.createElement('div');
+    line2.style.marginTop = '6px';
+    line2.textContent = '隨時資料庫:' + formatBytes(library.total) + (detail ? '(' + detail + ')' : '');
+    storageSummaryEl.appendChild(line2);
+
+    if (library.unknownCount) {
+      var unknown = document.createElement('div');
+      unknown.className = 'storage-note';
+      // 舊資料還沒有大小欄位,統計值會偏低 —— 講清楚,不要讓人以為數字是準的
+      unknown.textContent = '還有 ' + library.unknownCount + ' 筆沒有大小資料,統計值偏低;按「立即同步 Drive」跑一次就會補上';
+      storageSummaryEl.appendChild(unknown);
+    }
+    if (library.cleanedCount) {
+      var cleaned = document.createElement('div');
+      cleaned.className = 'storage-note';
+      cleaned.textContent = '另有 ' + library.cleanedCount + ' 筆已清理的紀錄(檔案已刪,標題與來源連結保留)';
+      storageSummaryEl.appendChild(cleaned);
+    }
+  }
+
+  function loadCleanupList() {
+    cleanupPickListEl.innerHTML = '<li class="empty">讀取中…</li>';
+    updateCleanupButton();
+    fetch(settings.gasUrl + '?action=cleanupList&type=' + encodeURIComponent(currentCleanupType) +
+          '&passKey=' + encodeURIComponent(settings.passKey))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.ok) { cleanupPickListEl.innerHTML = '<li class="empty">讀取失敗</li>'; return; }
+        renderCleanupList(data.files || []);
+      })
+      .catch(function () { cleanupPickListEl.innerHTML = '<li class="empty">離線中,無法讀取</li>'; });
+  }
+
+  function renderCleanupList(files) {
+    if (files.length === 0) {
+      cleanupPickListEl.innerHTML = '<li class="empty">這個類型目前沒有可清理的檔案</li>';
+      updateCleanupButton();
+      return;
+    }
+    cleanupPickListEl.innerHTML = '';
+    files.forEach(function (f) {
+      var li = document.createElement('li');
+
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = f.id;
+      cb.dataset.size = f.size || 0;
+      cb.addEventListener('change', updateCleanupButton);
+
+      var name = document.createElement('span');
+      name.className = 'pick-name';
+      name.textContent = (TYPE_ICON[f.type] || '') + ' ' + (f.note || f.filename) + ' · ' + f.tag;
+
+      var size = document.createElement('span');
+      size.className = 'pick-size';
+      size.textContent = formatBytes(f.size);
+
+      li.appendChild(cb);
+      li.appendChild(name);
+      li.appendChild(size);
+      cleanupPickListEl.appendChild(li);
+    });
+    updateCleanupButton();
+  }
+
+  function selectedCleanupBoxes() {
+    return Array.prototype.filter.call(
+      cleanupPickListEl.querySelectorAll('input[type=checkbox]'),
+      function (cb) { return cb.checked; }
+    );
+  }
+
+  function updateCleanupButton() {
+    var picked = selectedCleanupBoxes();
+    var bytes = picked.reduce(function (sum, cb) { return sum + Number(cb.dataset.size || 0); }, 0);
+    doCleanupBtn.disabled = picked.length === 0;
+    doCleanupBtn.textContent = picked.length
+      ? '清理所選(' + picked.length + ' 個,約 ' + formatBytes(bytes) + ')'
+      : '清理所選';
+  }
+
+  doCleanupBtn.addEventListener('click', function () {
+    var picked = selectedCleanupBoxes();
+    if (picked.length === 0) return;
+    var ids = picked.map(function (cb) { return cb.value; });
+    var warn = currentCleanupType === 'Podcast'
+      ? '這些 Podcast 音檔會被丟到垃圾桶(紀錄與來源連結會保留,之後可以重新封存)。確定嗎?'
+      : '這些檔案會被丟到垃圾桶,而且不像 Podcast 可以重新下載。確定嗎?';
+    if (!confirm(warn)) return;
+
+    doCleanupBtn.disabled = true;
+    doCleanupBtn.textContent = '清理中…';
+    fetch(settings.gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ passKey: settings.passKey, action: 'cleanupFiles', ids: ids })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          toast('已清理 ' + data.deleted + ' 個檔案,釋放約 ' + formatBytes(data.freedBytes) +
+                (data.failed ? '(' + data.failed + ' 個找不到,已跳過)' : ''));
+          loadStorageSummary();
+          loadCleanupList();
+        } else {
+          toast('清理失敗:' + (data.error || '未知錯誤'));
+          updateCleanupButton();
+        }
+      })
+      .catch(function () {
+        toast('離線中,無法清理');
+        updateCleanupButton();
+      });
+  });
 
   // ---------- 全域搜尋(跨課程,不用先選課程)----------
   // 跟單一課程的瀏覽不同,這裡每次查詢都是後端全表掃描(見 Code.gs 的 searchFilesAcrossCourses()),

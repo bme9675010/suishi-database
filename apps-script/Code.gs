@@ -27,9 +27,9 @@ function setup() {
   const ss = SpreadsheetApp.create('隨時資料庫_索引');
   const sheet = ss.getActiveSheet();
   sheet.setName('索引');
-  sheet.appendRow(['時間', '類型', '課程標籤', '檔名', 'Drive連結', '來源', '備註']);
+  sheet.appendRow(INDEX_HEADER);
   sheet.setFrozenRows(1);
-  sheet.autoResizeColumns(1, 7);
+  sheet.autoResizeColumns(1, INDEX_COLUMNS);
   DriveApp.getFileById(ss.getId()).moveTo(root);
 
   const passKey = Utilities.getUuid();
@@ -240,6 +240,8 @@ function extractFileId(url) {
  *   ?action=listFiles&course=X&passKey=xxx   → 回傳某課程底下所有照片/錄音/筆記清單
  *   ?action=searchFiles&q=關鍵字&passKey=xxx  → 跨課程搜尋檔名/備註/課程標籤,回傳結果帶課程標籤
  *   ?action=podcastJobStatus&passKey=xxx     → 回傳目前 Podcast 背景下載工作的進度(見 startPodcastJob())
+ *   ?action=storage&passKey=xxx              → 回傳 Drive 容量狀況與這個系統各類型的佔用
+ *   ?action=cleanupList&type=Podcast&passKey=xxx → 回傳可清理的檔案清單(依大小由大到小)
  *   (無參數)                                 → 健康檢查,瀏覽器打開網址確認服務正常
  */
 function doGet(e) {
@@ -302,6 +304,20 @@ function routeGet(e) {
     return jsonResponse({ ok: true, files: files });
   }
 
+  if (action === 'storage') {
+    if (param.passKey !== props.getProperty('PASS_KEY')) {
+      return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
+    return jsonResponse({ ok: true, quota: getDriveQuota(), library: getLibraryUsage(props) });
+  }
+
+  if (action === 'cleanupList') {
+    if (param.passKey !== props.getProperty('PASS_KEY')) {
+      return jsonResponse({ ok: false, error: 'unauthorized' });
+    }
+    return jsonResponse({ ok: true, files: listCleanupCandidates(param.type || 'Podcast', props) });
+  }
+
   if (action === 'podcastJobStatus') {
     if (param.passKey !== props.getProperty('PASS_KEY')) {
       return jsonResponse({ ok: false, error: 'unauthorized' });
@@ -337,7 +353,7 @@ function getFilesForCourse(courseName, props) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
 
-  const data = sheet.getRange(2, 1, lastRow - 1, 7).getValues(); // 時間,類型,課程標籤,檔名,Drive連結,來源,備註
+  const data = sheet.getRange(2, 1, lastRow - 1, INDEX_COLUMNS).getValues();
   const lower = courseName.toLowerCase();
   const results = [];
 
@@ -345,7 +361,10 @@ function getFilesForCourse(courseName, props) {
     const row = data[i];
     if (String(row[2]).toLowerCase() !== lower) continue;
     const time = row[0] instanceof Date ? row[0].toISOString() : String(row[0]);
-    results.push({ time: time, type: row[1], filename: row[3], url: row[4], note: row[6] || '' });
+    results.push({
+      time: time, type: row[1], filename: row[3], url: row[4], note: row[6] || '',
+      size: Number(row[7]) || 0, sourceUrl: row[8] || '', cleaned: isCleanedRow(row[4])
+    });
   }
 
   results.sort(function (a, b) { return new Date(b.time) - new Date(a.time); });
@@ -367,7 +386,7 @@ function searchFilesAcrossCourses(query, props) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
 
-  const data = sheet.getRange(2, 1, lastRow - 1, 7).getValues(); // 時間,類型,課程標籤,檔名,Drive連結,來源,備註
+  const data = sheet.getRange(2, 1, lastRow - 1, INDEX_COLUMNS).getValues();
   const results = [];
 
   for (let i = 0; i < data.length; i++) {
@@ -381,7 +400,10 @@ function searchFilesAcrossCourses(query, props) {
       note.toLowerCase().indexOf(q) === -1
     ) continue;
     const time = row[0] instanceof Date ? row[0].toISOString() : String(row[0]);
-    results.push({ time: time, type: row[1], tag: tag, filename: filename, url: row[4], note: note });
+    results.push({
+      time: time, type: row[1], tag: tag, filename: filename, url: row[4], note: note,
+      size: Number(row[7]) || 0, sourceUrl: row[8] || '', cleaned: isCleanedRow(row[4])
+    });
   }
 
   results.sort(function (a, b) { return new Date(b.time) - new Date(a.time); });
@@ -392,6 +414,8 @@ function searchFilesAcrossCourses(query, props) {
  * POST 端點:
  *   action: 'addCourse'     → PWA 新增課程用。Body: { passKey, action, courseName }
  *   action: 'removeCourse'  → PWA 刪除課程用。Body: { passKey, action, courseName }
+ *   action: 'cleanupFiles'  → PWA 清理空間用。Body: { passKey, action, ids: [Drive 檔案 ID] }
+ *                              檔案丟垃圾桶,索引表保留紀錄但清空 Drive連結(見 cleanupFiles())。
  *   action: 'setCourseCategory' → PWA 管理課程指定分類用。Body: { passKey, action, courseName, category }
  *                              category 是「學習」「工作」「投資」「家庭」其中之一,或空字串代表未分類。
  *                              如果這個課程已經有建立過 Drive 資料夾,會實際搬到新分類底下(見
@@ -463,6 +487,12 @@ function doPost(e) {
     }
     if (body.action === 'setCourseCategory') {
       return handleSetCourseCategory(body, props);
+    }
+    if (body.action === 'cleanupFiles') {
+      const ids = Array.isArray(body.ids) ? body.ids : [];
+      if (ids.length === 0) return jsonResponse({ ok: false, error: '沒有指定要清理的檔案' });
+      const r = cleanupFiles(ids, props);
+      return jsonResponse({ ok: true, deleted: r.deleted, failed: r.failed, freedBytes: r.freedBytes });
     }
     if (body.action === 'dismissCleanup') {
       return handleDismissCleanup(body, props);
@@ -642,6 +672,152 @@ function jsonResponse(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
+// ============ 空間與清理 ============
+
+/**
+ * 讀 Google Drive 的容量狀況。走 Drive API v3 的 about 端點,權限沿用既有的
+ * (跟 Podcast 分段上傳同一條路),不需要額外授權。
+ * 特別回傳垃圾桶佔用:在 Drive 刪檔案只是丟垃圾桶,空間不會馬上釋放 ——
+ * 這是最容易誤會的地方,要讓使用者看得到。
+ */
+function getDriveQuota() {
+  const resp = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/about?fields=storageQuota', {
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true
+  });
+  if (resp.getResponseCode() !== 200) {
+    throw new Error('讀取 Drive 空間失敗(HTTP ' + resp.getResponseCode() + ')');
+  }
+  const q = JSON.parse(resp.getContentText()).storageQuota || {};
+  return {
+    limit: Number(q.limit || 0), // 0 代表沒有上限(部分企業帳號)
+    usage: Number(q.usage || 0),
+    usageInDrive: Number(q.usageInDrive || 0),
+    trash: Number(q.usageInDriveTrash || 0)
+  };
+}
+
+/**
+ * 從索引表統計這個系統自己佔了多少空間,依類型分組。
+ * 已清理的列(Drive連結被清空)不計入 —— 檔案已經不在了。
+ * unknownCount 是「還沒有大小資料」的列數:舊資料要等對帳跑過才會補上,
+ * 在那之前統計值會偏低,這點要誠實告訴使用者,不要讓他以為數字是準的。
+ */
+function getLibraryUsage(props) {
+  const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+  const lastRow = sheet.getLastRow();
+  const byType = {};
+  let total = 0, cleanedCount = 0, unknownCount = 0;
+
+  if (lastRow >= 2) {
+    const data = sheet.getRange(2, 1, lastRow - 1, INDEX_COLUMNS).getValues();
+    for (let i = 0; i < data.length; i++) {
+      const row = data[i];
+      if (isCleanedRow(row[4])) { cleanedCount++; continue; }
+      const size = Number(row[7]) || 0;
+      if (!size) unknownCount++;
+      const type = String(row[1] || '其他');
+      byType[type] = (byType[type] || 0) + size;
+      total += size;
+    }
+  }
+  return { byType: byType, total: total, cleanedCount: cleanedCount, unknownCount: unknownCount };
+}
+
+/**
+ * 列出某個類型底下還沒被清理、可以考慮刪掉的檔案,依檔案大小由大到小。
+ * 預設用途是 Podcast:它是這個系統裡唯一能從外部重新取得的內容,刪掉的代價最低。
+ */
+function listCleanupCandidates(type, props) {
+  const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const data = sheet.getRange(2, 1, lastRow - 1, INDEX_COLUMNS).getValues();
+  const wanted = String(type || '').trim();
+  const results = [];
+
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    if (isCleanedRow(row[4])) continue;
+    if (wanted && String(row[1]) !== wanted) continue;
+    const id = extractFileId(row[4]);
+    if (!id) continue;
+    const time = row[0] instanceof Date ? row[0].toISOString() : String(row[0]);
+    results.push({
+      id: id, time: time, type: row[1], tag: row[2], filename: row[3],
+      note: row[6] || '', size: Number(row[7]) || 0, sourceUrl: row[8] || ''
+    });
+  }
+
+  results.sort(function (a, b) { return b.size - a.size; });
+  return results.slice(0, 200);
+}
+
+/**
+ * 把指定的檔案丟進垃圾桶,並把索引表對應列的「Drive連結」清空 ——
+ * 其他欄位(時間、類型、課程、檔名、備註、來源連結)全部保留,所以之後還查得到
+ * 「這一集叫什麼、是哪門課、原本從哪裡來」,Podcast 可以靠來源連結重新封存。
+ *
+ * 清空連結還有一個好處:對帳只追蹤連結解析得出檔案 ID 的列,所以這些列不會在下次
+ * 對帳時被當成失效紀錄刪掉,紀錄能長久留著。
+ */
+function cleanupFiles(ids, props) {
+  const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
+  const wanted = {};
+  ids.forEach(function (id) { wanted[id] = true; });
+
+  let freed = 0, deleted = 0, failed = 0;
+  ids.forEach(function (id) {
+    try {
+      const file = DriveApp.getFileById(id);
+      freed += file.getSize();
+      file.setTrashed(true);
+      deleted++;
+    } catch (err) {
+      failed++; // 檔案可能早就被手動刪掉了,不算致命
+    }
+  });
+
+  // 整欄讀出來改完一次寫回,不要逐列寫
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    const urls = sheet.getRange(2, 5, lastRow - 1, 1).getValues();
+    let touched = false;
+    for (let i = 0; i < urls.length; i++) {
+      const id = extractFileId(urls[i][0]);
+      if (id && wanted[id]) { urls[i][0] = ''; touched = true; }
+    }
+    if (touched) sheet.getRange(2, 5, lastRow - 1, 1).setValues(urls);
+  }
+
+  return { deleted: deleted, failed: failed, freedBytes: freed };
+}
+
+/**
+ * 把舊資料缺少的「大小」欄位補起來(整欄一次寫回,逐列寫在列數多的時候會非常慢)。
+ * sizeById 由對帳走訪檔案時順便收集。
+ */
+function backfillIndexSizes(sheet, sizeById) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+
+  const urls = sheet.getRange(2, 5, lastRow - 1, 1).getValues();
+  const sizes = sheet.getRange(2, 8, lastRow - 1, 1).getValues();
+  let filled = 0;
+
+  for (let i = 0; i < urls.length; i++) {
+    if (sizes[i][0] !== '' && sizes[i][0] !== null) continue;
+    const id = extractFileId(urls[i][0]);
+    if (id && sizeById[id] !== undefined) {
+      sizes[i][0] = sizeById[id];
+      filled++;
+    }
+  }
+  if (filled > 0) sheet.getRange(2, 8, lastRow - 1, 1).setValues(sizes);
+  return filled;
+}
+
 // ============ 收件夾自動掃描 (錄音走這條路) ============
 
 /**
@@ -721,6 +897,18 @@ function normalizeTag(tag, props) {
 }
 
 // ============ 共用歸檔邏輯 ============
+
+// 索引表欄位。「大小」用來算佔用空間、排出最該清理的檔案;「來源連結」目前只有 Podcast 會填,
+// 讓音檔清掉之後還找得回原本那一集(Podcast 是這個系統裡唯一能從外部重新取得的內容)。
+// 舊資料這兩欄是空的,對帳時會順便把大小回填進去。
+const INDEX_HEADER = ['時間', '類型', '課程標籤', '檔名', 'Drive連結', '來源', '備註', '大小', '來源連結'];
+const INDEX_COLUMNS = INDEX_HEADER.length;
+
+// 索引表裡「Drive連結」被清空,代表這個檔案已經被清理掉了(音檔刪了,紀錄留著)。
+// 對帳只追蹤連結解析得出檔案 ID 的列,所以這種列不會被當成失效紀錄刪掉,剛好符合需求。
+function isCleanedRow(url) {
+  return !String(url || '').trim();
+}
 
 const TYPE_FOLDER_NAME = { photo: '照片', audio: '錄音', note: '筆記', podcast: 'Podcast', doc: '文件' };
 
@@ -845,9 +1033,12 @@ function prepareArchiveSlot(type, tag, ext, props) {
   return { now: now, typeFolder: typeFolder, typeFolderName: typeFolderName, safeTag: safeTag, newName: newName };
 }
 
-function writeIndexRow(slot, fileUrl, source, note, props) {
+function writeIndexRow(slot, fileUrl, source, note, props, size, sourceUrl) {
   const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
-  sheet.appendRow([slot.now, slot.typeFolderName, slot.safeTag, slot.newName, fileUrl, source, note || '']);
+  sheet.appendRow([
+    slot.now, slot.typeFolderName, slot.safeTag, slot.newName, fileUrl, source, note || '',
+    size || '', sourceUrl || ''
+  ]);
 }
 
 /**
@@ -858,7 +1049,7 @@ function fileIntoLibrary(blob, type, tag, source, note) {
   const slot = prepareArchiveSlot(type, tag, extensionOf(blob.getName()), props);
   blob.setName(slot.newName);
   const file = slot.typeFolder.createFile(blob);
-  writeIndexRow(slot, file.getUrl(), source, note, props);
+  writeIndexRow(slot, file.getUrl(), source, note, props, file.getSize());
   return { url: file.getUrl(), name: slot.newName };
 }
 
@@ -875,7 +1066,7 @@ function moveFileIntoLibrary(file, type, tag, source, note) {
   const slot = prepareArchiveSlot(type, tag, extensionOf(file.getName()), props);
   file.setName(slot.newName);
   file.moveTo(slot.typeFolder);
-  writeIndexRow(slot, file.getUrl(), source, note, props);
+  writeIndexRow(slot, file.getUrl(), source, note, props, file.getSize());
   return { url: file.getUrl(), name: slot.newName };
 }
 
@@ -930,7 +1121,7 @@ function saveNote(courseTag, blocks, props) {
   if (isNew) {
     noteFolder.addFile(file);
     DriveApp.getRootFolder().removeFile(file); // DocumentApp.create() 一律先建在 Drive 根目錄,建好要手動搬過去
-    sheet.appendRow([now, TYPE_FOLDER_NAME.note, safeTag, fileName, file.getUrl(), 'PWA', '']);
+    sheet.appendRow([now, TYPE_FOLDER_NAME.note, safeTag, fileName, file.getUrl(), 'PWA', '', file.getSize(), '']);
   } else {
     updateIndexRowTime(sheet, file.getUrl(), now); // 讓瀏覽清單排序反映「最後編輯時間」而不是第一次建立時間
   }
@@ -1120,6 +1311,8 @@ function startPodcastJob(appleUrl, tag, props) {
     status: 'downloading',
     tag: safeTag,
     episodeTitle: episodeTitle,
+    appleUrl: appleUrl, // 音檔日後被清理掉時,靠這個連結還能找回原本那一集
+
     audioUrl: audioUrl,
     contentType: mimeType,
     fileName: fileName,
@@ -1330,7 +1523,10 @@ function finalizePodcastJob(job, props) {
   try {
     const file = DriveApp.getFileById(job.driveFileId);
     const sheet = SpreadsheetApp.openById(props.getProperty('SHEET_ID')).getSheetByName('索引');
-    sheet.appendRow([new Date(), TYPE_FOLDER_NAME.podcast, job.tag, job.fileName, file.getUrl(), 'Podcast', job.episodeTitle]);
+    sheet.appendRow([
+      new Date(), TYPE_FOLDER_NAME.podcast, job.tag, job.fileName, file.getUrl(), 'Podcast',
+      job.episodeTitle, job.totalSize || file.getSize(), job.appleUrl || ''
+    ]);
     job.status = 'done';
     job.resultUrl = file.getUrl();
     job.resultName = job.fileName;
@@ -1407,6 +1603,7 @@ function reconcileIndex() {
     // 2. 走訪每個課程資料夾(排除收件夾、垃圾桶、分類這層本身),收集實際存在的檔案;
     //    沒登記到索引表的就準備補登
     const actualIds = {};
+    const sizeById = {}; // 順便收集檔案大小,結束前回填索引表缺少的那一欄
     const newRows = [];
     getCourseFoldersUnderRoot(root, inboxId).forEach(function (courseFolder) {
       // 用課程清單裡登記的大小寫版本(如果有的話),避免資料夾被手動改過大小寫時,
@@ -1420,6 +1617,7 @@ function reconcileIndex() {
         courseHasFiles = true;
         const id = file.getId();
         actualIds[id] = true;
+        sizeById[id] = file.getSize();
         if (!indexById[id]) {
           newRows.push([
             file.getDateCreated(),
@@ -1428,6 +1626,8 @@ function reconcileIndex() {
             file.getName(),
             file.getUrl(),
             '對帳補登',
+            '',
+            file.getSize(),
             ''
           ]);
         }
@@ -1458,13 +1658,14 @@ function reconcileIndex() {
       sheet.getRange(startRow, 1, newRows.length, newRows[0].length).setValues(newRows);
     }
 
+    const filledSizes = backfillIndexSizes(sheet, sizeById); // 把舊資料缺的大小補上
     autoResolvePendingCleanup(props); // 順手核銷「資料夾已刪」的待清理提醒,讓每日排程做的是全套同步
     // 回報耗時:全樹掃描的時間會隨檔案數成長,單次執行超過 6 分鐘會被 Apps Script 直接中斷。
     // 把耗時帶回前端顯示,是為了在真的撞到上限之前就看得出「愈跑愈久」的趨勢 ——
     // 否則第一個徵兆就是同步整個壞掉。等它真的逼近上限再改成分批處理即可,現在不用預先複雜化。
     const elapsedMs = Date.now() - startedAt;
     Logger.log('對帳完成:補登 ' + newRows.length + ' 筆、清除 ' + rowsToDelete.length +
-      ' 筆失效紀錄,耗時 ' + (elapsedMs / 1000).toFixed(1) + ' 秒。');
+      ' 筆失效紀錄、回填 ' + filledSizes + ' 筆檔案大小,耗時 ' + (elapsedMs / 1000).toFixed(1) + ' 秒。');
     return { added: newRows.length, removed: rowsToDelete.length, ms: elapsedMs };
   } finally {
     lock.releaseLock();

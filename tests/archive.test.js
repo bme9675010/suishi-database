@@ -171,6 +171,7 @@ test('scanInbox:收件夾裡每個檔案都要被處理到,不會因為邊走訪
       getName: function () { return spec.name; },
       getUrl: function () { return 'https://drive.google.com/file/d/' + spec.id + '/view'; },
       getMimeType: function () { return spec.mimeType; },
+      getSize: function () { return 2048; },
       getDateCreated: function () { return new Date('2026-07-20T10:00:00Z'); },
       isTrashed: function () { return false; },
       setName: function (n) { spec.name = n; return file; },
